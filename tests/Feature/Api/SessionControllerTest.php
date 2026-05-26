@@ -25,6 +25,16 @@ class SessionControllerTest extends TestCase
         $this->assertSame('gemma4:27b', AgentSession::first()->model_generative);
     }
 
+    public function test_it_stores_model_planning_when_provided(): void
+    {
+        $this->postJson('/api/sessions', [
+            'model'          => 'qwen2.5:32b',
+            'model_planning' => 'qwen2.5:7b',
+        ])->assertStatus(201);
+
+        $this->assertSame('qwen2.5:7b', AgentSession::first()->model_planning);
+    }
+
     public function test_it_uses_default_model_when_not_provided(): void
     {
         $response = $this->postJson('/api/sessions', []);
@@ -119,6 +129,7 @@ class SessionControllerTest extends TestCase
     {
         return AgentSession::create([
             'model_generative' => $model,
+            'model_planning'   => 'qwen2.5:7b',
             'model_embedding'  => 'mxbai-embed-large',
         ]);
     }

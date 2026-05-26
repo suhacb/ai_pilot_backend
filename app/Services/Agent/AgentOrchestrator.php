@@ -31,7 +31,9 @@ class AgentOrchestrator
      */
     public function run(string $query, AgentSession $session): \Generator
     {
-        $model   = $session->model_generative;
+        $planningModel   = $session->model_planning ?? $session->model_generative;
+        $generativeModel = $session->model_generative;
+
         $context = $this->buildSystemPrompt();
         $context .= "\n\nUser query: " . $query . "\n";
 
@@ -40,13 +42,14 @@ class AgentOrchestrator
                 ? "\nProvide your first step as JSON:"
                 : "\nProvide your next step as JSON:";
 
-            $raw  = $this->ollama->generate($context . $suffix, $model);
+            $raw  = $this->ollama->generate($context . $suffix, $planningModel, true);
             $step = $this->parseResponse($raw);
 
             if (($step['action'] ?? '') === 'finish') {
-                $finalAnswer = $step['parameters']['final_answer'] ?? $raw;
-
                 $this->persistStep($session, $i, $step['reasoning'] ?? '', null, null, null);
+
+                $synthesisPrompt = $this->buildSynthesisPrompt($query, $context);
+                $finalAnswer     = $this->ollama->generate($synthesisPrompt, $generativeModel, false);
 
                 yield ['type' => 'answer', 'content' => $finalAnswer];
                 return;
@@ -170,6 +173,21 @@ When you have gathered sufficient information, use action "finish":
 }
 
 Respond in the same language as the user's query. For Slovenian queries, answer in Slovenian.
+PROMPT;
+    }
+
+    private function buildSynthesisPrompt(string $query, string $gatheredContext): string
+    {
+        return <<<PROMPT
+You are an AI compliance advisor for a physical and technical security company subject to ZInfV-1.
+
+Below is a research process that was performed to answer the user's query. Review all gathered information and synthesize a comprehensive, well-structured final answer.
+
+{$gatheredContext}
+
+Original query: {$query}
+
+Write a clear, structured answer based on the above research. Cite specific documents and article numbers where relevant. Respond in the same language as the user's query (Slovenian queries require a Slovenian answer).
 PROMPT;
     }
 

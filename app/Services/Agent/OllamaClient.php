@@ -15,21 +15,26 @@ class OllamaClient
     /**
      * Generate a completion from Ollama.
      *
-     * Returns the raw response string from the model (expected to be JSON
-     * when format=json is set, which is enforced here).
+     * @param  bool  $jsonFormat  When true, constrains output to JSON format (for ReAct loop).
+     *                            Set false for synthesis calls that return natural prose.
      *
      * @throws \RuntimeException on HTTP error
      */
-    public function generate(string $prompt, string $model): string
+    public function generate(string $prompt, string $model, bool $jsonFormat = true): string
     {
+        $payload = [
+            'model'  => $model,
+            'prompt' => $prompt,
+            'stream' => false,
+        ];
+
+        if ($jsonFormat) {
+            $payload['format'] = 'json';
+        }
+
         try {
             $response = $this->client->post("$this->url/api/generate", [
-                'json' => [
-                    'model'  => $model,
-                    'prompt' => $prompt,
-                    'stream' => false,
-                    'format' => 'json',
-                ],
+                'json' => $payload,
             ]);
         } catch (GuzzleException $e) {
             throw new \RuntimeException(

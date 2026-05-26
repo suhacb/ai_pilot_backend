@@ -99,6 +99,22 @@ class OllamaClientTest extends TestCase
         $this->assertSame(self::BASE_URL . '/api/tags', (string) $request->getUri());
     }
 
+    public function test_it_omits_format_field_when_json_format_is_false(): void
+    {
+        $client = $this->makeClient([
+            new Response(200, [], json_encode([
+                'model'    => self::MODEL,
+                'response' => 'Synthesized prose answer.',
+                'done'     => true,
+            ])),
+        ]);
+
+        $client->generate('My prompt', self::MODEL, false);
+
+        $body = json_decode((string) $this->history[0]['request']->getBody(), true);
+        $this->assertArrayNotHasKey('format', $body);
+    }
+
     // -------------------------------------------------------------------------
 
     /** @param  Response[]  $responses */

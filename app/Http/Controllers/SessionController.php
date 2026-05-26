@@ -21,10 +21,12 @@ class SessionController extends Controller
      */
     public function store(Request $request): JsonResponse
     {
-        $model = $request->input('model', config('agent.default_model'));
+        $model         = $request->input('model', config('agent.default_model'));
+        $modelPlanning = $request->input('model_planning', config('agent.default_planning_model'));
 
         $session = AgentSession::create([
             'model_generative' => $model,
+            'model_planning'   => $modelPlanning,
             'model_embedding'  => config('services.ollama.embedding_model'),
         ]);
 

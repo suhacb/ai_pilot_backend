@@ -11,6 +11,7 @@ class AgentSession extends Model
 
     protected $fillable = [
         'model_generative',
+        'model_planning',
         'model_embedding',
         'use_case_detected',
     ];

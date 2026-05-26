@@ -23,7 +23,8 @@ class AgentOrchestratorTest extends TestCase
     {
         parent::setUp();
         $this->session = AgentSession::create([
-            'model_generative' => 'test-model',
+            'model_generative' => 'test-generative',
+            'model_planning'   => 'test-planning',
             'model_embedding'  => 'test-embed',
         ]);
     }
@@ -33,6 +34,7 @@ class AgentOrchestratorTest extends TestCase
         $orchestrator = $this->makeOrchestrator(ollamaResponses: [
             $this->toolCallResponse('search_semantic', ['query' => 'ZInfV-1 obveznosti']),
             $this->finishResponse('Obveznosti so naslednje...'),
+            'Sintetiziran odgovor.',
         ], toolObservation: 'Našel sem relevantne rezultate.');
 
         $events = iterator_to_array($orchestrator->run('Kakšne so naše obveznosti?', $this->session), false);
@@ -47,6 +49,7 @@ class AgentOrchestratorTest extends TestCase
         $orchestrator = $this->makeOrchestrator(ollamaResponses: [
             $this->toolCallResponse('search_fulltext', ['query' => 'člen 12', 'top_k' => 3]),
             $this->finishResponse('Odgovor.'),
+            'Sintetiziran odgovor.',
         ], toolObservation: 'Rezultati iskanja.');
 
         $events = iterator_to_array($orchestrator->run('Iščem člen 12.', $this->session), false);
@@ -61,7 +64,8 @@ class AgentOrchestratorTest extends TestCase
     public function test_it_yields_correct_answer_payload(): void
     {
         $orchestrator = $this->makeOrchestrator(ollamaResponses: [
-            $this->finishResponse('To je moj končni odgovor.'),
+            $this->finishResponse('intermediate'),
+            'To je moj končni odgovor.',  // synthesis call returns the actual content
         ]);
 
         $events = iterator_to_array($orchestrator->run('Vprašanje.', $this->session), false);
@@ -83,6 +87,7 @@ class AgentOrchestratorTest extends TestCase
             ollamaResponses: [
                 $this->toolCallResponse('search_semantic', ['query' => 'test']),
                 $this->finishResponse('done'),
+                'synthesis result',
             ],
             semanticTool: $mockSemantic,
             fulltextTool: $mockFulltext,
@@ -96,6 +101,7 @@ class AgentOrchestratorTest extends TestCase
         $orchestrator = $this->makeOrchestrator(ollamaResponses: [
             $this->toolCallResponse('search_web', ['query' => 'dobavitelji']),
             $this->finishResponse('Ocena tveganja.'),
+            'Synthesized risk assessment.',
         ], toolObservation: 'Spletni rezultati.');
 
         iterator_to_array($orchestrator->run('Oceni dobavitelja.', $this->session), false);
@@ -146,6 +152,53 @@ class AgentOrchestratorTest extends TestCase
 
         $last = end($events);
         $this->assertSame('answer', $last['type']);
+    }
+
+    public function test_it_uses_planning_model_for_loop_and_generative_for_synthesis(): void
+    {
+        $session = AgentSession::create([
+            'model_generative' => 'large-model',
+            'model_planning'   => 'small-model',
+            'model_embedding'  => 'test-embed',
+        ]);
+
+        $callLog    = [];
+        $mockOllama = $this->createMock(OllamaClient::class);
+        $mockOllama->method('generate')
+            ->willReturnCallback(function (string $prompt, string $model, bool $jsonFormat = true) use (&$callLog): string {
+                $callLog[] = ['model' => $model, 'jsonFormat' => $jsonFormat];
+
+                if ($model === 'small-model') {
+                    return json_encode([
+                        'reasoning'  => 'Zbral sem dovolj informacij.',
+                        'action'     => 'finish',
+                        'parameters' => ['final_answer' => 'intermediate'],
+                    ]);
+                }
+
+                return 'Sintetiziran končni odgovor.';
+            });
+
+        $orchestrator = new AgentOrchestrator(
+            $mockOllama,
+            $this->stubTool(SemanticSearchTool::class, ''),
+            $this->stubTool(FulltextSearchTool::class, ''),
+            $this->stubTool(WebSearchTool::class, ''),
+            $this->stubTool(GetDocumentTool::class, ''),
+            maxIterations: 8,
+        );
+
+        $events = iterator_to_array($orchestrator->run('Vprašanje.', $session), false);
+
+        $this->assertCount(2, $callLog);
+        $this->assertSame('small-model', $callLog[0]['model']);
+        $this->assertTrue($callLog[0]['jsonFormat']);
+        $this->assertSame('large-model', $callLog[1]['model']);
+        $this->assertFalse($callLog[1]['jsonFormat']);
+
+        $answer = end($events);
+        $this->assertSame('answer', $answer['type']);
+        $this->assertSame('Sintetiziran končni odgovor.', $answer['content']);
     }
 
     // -------------------------------------------------------------------------
