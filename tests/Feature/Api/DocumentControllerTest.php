@@ -56,6 +56,23 @@ class DocumentControllerTest extends TestCase
           ->assertJsonPath('message', 'Ingestion started.');
     }
 
+    public function test_it_triggers_ingestion_for_html_file(): void
+    {
+        Artisan::shouldReceive('call')
+               ->once()
+               ->with('documents:ingest', [
+                   'filename'      => 'NIS2.html',
+                   '--source-type' => 'legislation',
+               ])
+               ->andReturn(0);
+
+        $this->postJson('/api/documents/ingest', [
+            'filename'    => 'NIS2.html',
+            'source_type' => 'legislation',
+        ])->assertStatus(200)
+          ->assertJsonPath('message', 'Ingestion started.');
+    }
+
     public function test_it_returns_422_when_filename_is_missing(): void
     {
         $this->postJson('/api/documents/ingest', ['source_type' => 'legislation'])

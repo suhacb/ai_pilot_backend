@@ -27,7 +27,7 @@ class DocumentController extends Controller
     public function ingest(Request $request): JsonResponse
     {
         $request->validate([
-            'filename'    => ['required', 'string', 'regex:/\.docx$/i'],
+            'filename'    => ['required', 'string', 'regex:/\.(docx|html|htm)$/i'],
             'source_type' => ['required', 'in:internal_policy,legislation'],
         ]);
 

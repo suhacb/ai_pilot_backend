@@ -20,14 +20,16 @@ class IngestCommandTest extends TestCase
 {
     use RefreshDatabase;
 
-    private const DOCS_PATH = 'private/docs';
-    private const FILENAME  = 'test_fixture.docx';
+    private const DOCS_PATH    = 'private/docs';
+    private const FILENAME     = 'test_fixture.docx';
+    private const HTML_FILENAME = 'test_fixture.html';
 
     protected function setUp(): void
     {
         parent::setUp();
         Storage::fake('local');
         $this->putFixtureOnDisk();
+        $this->putHtmlFixtureOnDisk();
         $this->bindMockedServices(chunkCount: 2);
     }
 
@@ -49,6 +51,14 @@ class IngestCommandTest extends TestCase
     {
         $this->artisan('documents:ingest', ['filename' => 'document.pdf'])
              ->assertExitCode(1);
+    }
+
+    public function test_it_ingests_an_html_file(): void
+    {
+        $this->artisan('documents:ingest', [
+            'filename'      => self::HTML_FILENAME,
+            '--source-type' => 'legislation',
+        ])->assertExitCode(0);
     }
 
     public function test_it_outputs_progress_lines_during_ingestion(): void
@@ -89,6 +99,26 @@ class IngestCommandTest extends TestCase
         );
 
         unlink($tmp);
+    }
+
+    private function putHtmlFixtureOnDisk(): void
+    {
+        $html = <<<HTML
+<!DOCTYPE html>
+<html>
+<body>
+<h2>Člen 1 — Splošne določbe</h2>
+<p>Ta zakon ureja varnost informacij v Republiki Sloveniji.</p>
+<h2>Člen 2 — Opredelitev pojmov</h2>
+<p>V tem zakonu se uporabljajo naslednji pojmi.</p>
+</body>
+</html>
+HTML;
+
+        Storage::disk('local')->put(
+            self::DOCS_PATH . '/' . self::HTML_FILENAME,
+            $html
+        );
     }
 
     private function bindMockedServices(int $chunkCount): void

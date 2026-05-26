@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Models\Document;
 use App\Models\DocumentChunk;
 use App\Services\Ingestion\DocxParser;
+use App\Services\Ingestion\HtmlParser;
 use App\Services\Ingestion\OllamaEmbedder;
 use App\Services\Ingestion\QdrantStore;
 use App\Services\Ingestion\TextChunker;
@@ -22,7 +23,8 @@ class IngestDocumentCommand extends Command
     protected $description = 'Parse, chunk, embed and store a .docx document from the documents storage path';
 
     public function __construct(
-        private readonly DocxParser $parser,
+        private readonly DocxParser $docxParser,
+        private readonly HtmlParser $htmlParser,
         private readonly TextChunker $chunker,
         private readonly OllamaEmbedder $embedder,
         private readonly QdrantStore $qdrant,
@@ -41,8 +43,9 @@ class IngestDocumentCommand extends Command
             return self::FAILURE;
         }
 
-        if (strtolower(pathinfo($filename, PATHINFO_EXTENSION)) !== 'docx') {
-            $this->error("File must have a .docx extension: $filename");
+        $extension = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+        if (! in_array($extension, ['docx', 'html', 'htm'], true)) {
+            $this->error("File must have a .docx or .html extension: $filename");
             return self::FAILURE;
         }
 
@@ -66,7 +69,9 @@ class IngestDocumentCommand extends Command
         ]);
 
         try {
-            $sections = $this->parser->parse($absolutePath);
+            $sections = $extension === 'docx'
+                ? $this->docxParser->parse($absolutePath)
+                : $this->htmlParser->parse($absolutePath);
             $chunks   = $this->chunker->chunk($sections, $name, $sourceType);
 
             if (empty($chunks)) {
