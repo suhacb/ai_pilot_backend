@@ -43,4 +43,28 @@ class OllamaClient
 
         return $data['response'];
     }
+
+    /**
+     * List all models available in Ollama.
+     *
+     * @return string[]  model names
+     *
+     * @throws \RuntimeException on HTTP error
+     */
+    public function listModels(): array
+    {
+        try {
+            $response = $this->client->get("$this->url/api/tags");
+        } catch (GuzzleException $e) {
+            throw new \RuntimeException(
+                "Ollama tags request failed: {$e->getMessage()}",
+                0,
+                $e
+            );
+        }
+
+        $data = json_decode((string) $response->getBody(), true);
+
+        return array_column($data['models'] ?? [], 'name');
+    }
 }

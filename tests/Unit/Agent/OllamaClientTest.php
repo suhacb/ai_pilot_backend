@@ -70,6 +70,35 @@ class OllamaClientTest extends TestCase
         $client->generate('prompt', self::MODEL);
     }
 
+    public function test_list_models_returns_model_names_from_ollama_tags(): void
+    {
+        $client = $this->makeClient([
+            new Response(200, [], json_encode([
+                'models' => [
+                    ['name' => 'gemma4:27b'],
+                    ['name' => 'mxbai-embed-large'],
+                ],
+            ])),
+        ]);
+
+        $models = $client->listModels();
+
+        $this->assertSame(['gemma4:27b', 'mxbai-embed-large'], $models);
+    }
+
+    public function test_list_models_sends_get_to_api_tags(): void
+    {
+        $client = $this->makeClient([
+            new Response(200, [], json_encode(['models' => []])),
+        ]);
+
+        $client->listModels();
+
+        $request = $this->history[0]['request'];
+        $this->assertSame('GET', $request->getMethod());
+        $this->assertSame(self::BASE_URL . '/api/tags', (string) $request->getUri());
+    }
+
     // -------------------------------------------------------------------------
 
     /** @param  Response[]  $responses */
