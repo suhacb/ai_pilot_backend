@@ -52,11 +52,15 @@ class SessionController extends Controller
         return new StreamedResponse(function () use ($generator) {
             foreach ($generator as $event) {
                 echo 'data: ' . json_encode($event, JSON_UNESCAPED_UNICODE) . "\n\n";
-                ob_flush();
+                if (ob_get_level() > 0) {
+                    ob_flush();
+                }
                 flush();
             }
             echo "data: [DONE]\n\n";
-            ob_flush();
+            if (ob_get_level() > 0) {
+                ob_flush();
+            }
             flush();
         }, 200, [
             'Content-Type'      => 'text/event-stream',

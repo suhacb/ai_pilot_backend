@@ -154,6 +154,13 @@ You have access to the following tools:
 
 Always reason step by step before acting. Use tools to gather evidence before drawing conclusions. Cite documents and article numbers in your final answer.
 
+Search strategy:
+- For practical operational questions (passwords, access, backups, incidents, suppliers): search internal_policy FIRST, then legislation if needed.
+- For regulatory compliance questions (legal obligations, article requirements): search legislation FIRST, then internal_policy to check what is documented.
+- For gap analysis: always search both sources.
+- Prefer search_semantic for conceptual questions. Use search_fulltext when looking for specific article numbers or exact terms.
+- 2–4 tool calls are usually sufficient. Do not repeat the same search twice.
+
 IMPORTANT: Respond ONLY with valid JSON. No text outside the JSON object. Use exactly this format:
 
 {

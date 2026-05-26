@@ -43,7 +43,7 @@ class AppServiceProvider extends ServiceProvider
         // ── Agent ────────────────────────────────────────────────────────────
 
         $this->app->singleton(OllamaClient::class, fn() => new OllamaClient(
-            new Client(['timeout' => 120.0]),
+            new Client(['timeout' => 600.0]),
             config('services.ollama.url'),
         ));
 
