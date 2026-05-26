@@ -35,4 +35,25 @@ return [
         ],
     ],
 
+    'ollama' => [
+        'url'             => env('OLLAMA_URL', 'http://ollama:11434'),
+        'embedding_model' => env('OLLAMA_EMBEDDING_MODEL', 'mxbai-embed-large'),
+    ],
+
+    'qdrant' => [
+        'url'        => env('QDRANT_URL', 'http://qdrant:6333'),
+        'collection' => env('QDRANT_COLLECTION', 'compliance_docs'),
+    ],
+
+    'zincsearch' => [
+        'url'      => env('ZINCSEARCH_URL', 'http://zincsearch:4080'),
+        'index'    => env('ZINCSEARCH_INDEX', 'compliance_docs'),
+        'user'     => env('ZINCSEARCH_USER', 'admin'),
+        'password' => env('ZINCSEARCH_PASSWORD', 'secret'),
+    ],
+
+    'documents' => [
+        'path' => env('DOCUMENTS_PATH', 'private/docs'),
+    ],
+
 ];

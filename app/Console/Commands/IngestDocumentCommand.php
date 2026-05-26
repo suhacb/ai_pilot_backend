@@ -1,0 +1,140 @@
+<?php
+
+namespace App\Console\Commands;
+
+use App\Models\Document;
+use App\Models\DocumentChunk;
+use App\Services\Ingestion\DocxParser;
+use App\Services\Ingestion\OllamaEmbedder;
+use App\Services\Ingestion\QdrantStore;
+use App\Services\Ingestion\TextChunker;
+use App\Services\Ingestion\ZincSearchStore;
+use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+
+class IngestDocumentCommand extends Command
+{
+    protected $signature = 'documents:ingest
+                            {filename : Name of the .docx file inside the configured documents directory}
+                            {--source-type=internal_policy : internal_policy|legislation}';
+
+    protected $description = 'Parse, chunk, embed and store a .docx document from the documents storage path';
+
+    public function __construct(
+        private readonly DocxParser $parser,
+        private readonly TextChunker $chunker,
+        private readonly OllamaEmbedder $embedder,
+        private readonly QdrantStore $qdrant,
+        private readonly ZincSearchStore $zinc,
+    ) {
+        parent::__construct();
+    }
+
+    public function handle(): int
+    {
+        $filename   = $this->argument('filename');
+        $sourceType = $this->option('source-type');
+
+        if (! in_array($sourceType, ['internal_policy', 'legislation'], true)) {
+            $this->error("Invalid source-type '$sourceType'. Use: internal_policy or legislation.");
+            return self::FAILURE;
+        }
+
+        if (strtolower(pathinfo($filename, PATHINFO_EXTENSION)) !== 'docx') {
+            $this->error("File must have a .docx extension: $filename");
+            return self::FAILURE;
+        }
+
+        $disk         = Storage::disk('local');
+        $relativePath = config('services.documents.path') . '/' . $filename;
+
+        if (! $disk->exists($relativePath)) {
+            $this->error("File not found in document storage: $relativePath");
+            return self::FAILURE;
+        }
+
+        // phpoffice/phpword requires an absolute filesystem path
+        $absolutePath = $disk->path($relativePath);
+        $name         = pathinfo($filename, PATHINFO_FILENAME);
+
+        $document = Document::create([
+            'name'        => $name,
+            'file_path'   => $relativePath,
+            'source_type' => $sourceType,
+            'status'      => 'processing',
+        ]);
+
+        try {
+            $sections = $this->parser->parse($absolutePath);
+            $chunks   = $this->chunker->chunk($sections, $name, $sourceType);
+
+            if (empty($chunks)) {
+                $this->warn("No chunks produced — document may be empty.");
+                $document->update(['status' => 'indexed', 'ingested_at' => now()]);
+                return self::SUCCESS;
+            }
+
+            $firstVector = $this->embedder->embed($chunks[0]['content']);
+            $this->qdrant->ensureCollection(count($firstVector));
+
+            $total = count($chunks);
+
+            foreach ($chunks as $i => $chunk) {
+                if (DocumentChunk::where('content_hash', $chunk['content_hash'])->exists()) {
+                    $this->line("Chunk " . ($i + 1) . "/$total — skipped (already indexed)");
+                    continue;
+                }
+
+                $vector  = $i === 0 ? $firstVector : $this->embedder->embed($chunk['content']);
+                $pointId = Str::uuid()->toString();
+
+                $this->qdrant->upsert($pointId, $vector, [
+                    'document_name' => $chunk['document_name'],
+                    'source_type'   => $chunk['source_type'],
+                    'section_title' => $chunk['section_title'],
+                    'chunk_index'   => $chunk['chunk_index'],
+                    'content'       => $chunk['content'],
+                    'content_hash'  => $chunk['content_hash'],
+                ]);
+
+                $this->zinc->upsert($pointId, [
+                    'document_name' => $chunk['document_name'],
+                    'source_type'   => $chunk['source_type'],
+                    'section_title' => $chunk['section_title'],
+                    'chunk_index'   => $chunk['chunk_index'],
+                    'content'       => $chunk['content'],
+                    'content_hash'  => $chunk['content_hash'],
+                ]);
+
+                DocumentChunk::create([
+                    'document_id'   => $document->id,
+                    'qdrant_id'     => $pointId,
+                    'chunk_index'   => $chunk['chunk_index'],
+                    'section_title' => $chunk['section_title'],
+                    'content'       => $chunk['content'],
+                    'content_hash'  => $chunk['content_hash'],
+                    'token_count'   => $chunk['token_count'],
+                ]);
+
+                $this->line("Chunk " . ($i + 1) . "/$total — '{$chunk['section_title']}'");
+            }
+
+            $indexed = DocumentChunk::where('document_id', $document->id)->count();
+            $document->update([
+                'status'      => 'indexed',
+                'chunk_count' => $indexed,
+                'ingested_at' => now(),
+            ]);
+
+            $this->info("Done. $indexed chunks indexed for '$name'.");
+
+        } catch (\Throwable $e) {
+            $document->update(['status' => 'failed']);
+            $this->error($e->getMessage());
+            return self::FAILURE;
+        }
+
+        return self::SUCCESS;
+    }
+}
