@@ -50,10 +50,13 @@ class HtmlParser
 
         $xpath = new \DOMXPath($dom);
 
-        // Select all heading tags and every <p> in document order.
-        // Classification (heading vs body vs skip) happens in the loop via CSS class inspection,
-        // so this works regardless of which HTML source the file comes from.
-        $nodes = $xpath->query('//h1|//h2|//h3|//h4|//h5|//h6|//p');
+        // Select heading tags, paragraphs, and divs that carry EUR-Lex heading classes
+        // (eli-main-title, eli-title appear on <div> elements in EUR-Lex OJ HTML).
+        // Classification (heading vs body vs skip) happens in the loop via CSS class inspection.
+        $nodes = $xpath->query(
+            '//h1|//h2|//h3|//h4|//h5|//h6|//p' .
+            '|//div[contains(@class,"eli-main-title") or contains(@class,"eli-title")]'
+        );
 
         $sections       = [];
         $currentHeading = null;
