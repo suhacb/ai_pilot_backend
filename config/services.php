@@ -36,8 +36,13 @@ return [
     ],
 
     'ollama' => [
-        'url'             => env('OLLAMA_URL', 'http://ollama:11434'),
-        'embedding_model' => env('OLLAMA_EMBEDDING_MODEL', 'mxbai-embed-large'),
+        'url'               => env('OLLAMA_URL', 'http://ollama:11434'),
+        'generative_model'  => env('OLLAMA_GENERATIVE_MODEL', 'gemma4:27b'),
+        'embedding_model'   => env('OLLAMA_EMBEDDING_MODEL', 'mxbai-embed-large'),
+    ],
+
+    'searxng' => [
+        'url' => env('SEARXNG_URL', 'http://searxng:8080'),
     ],
 
     'qdrant' => [
