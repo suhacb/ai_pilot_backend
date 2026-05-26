@@ -39,11 +39,11 @@ class TextChunkerTest extends TestCase
 
     public function test_it_does_not_exceed_the_token_limit_per_chunk(): void
     {
-        // ~6000 chars across 3 paragraphs — will produce multiple chunks
+        // ~3600 chars across 3 paragraphs — will produce multiple chunks at 1200-char target
         $body = implode("\n\n", [
-            str_repeat('Besedilo prvega odstavka. ', 90),   // ~2340 chars
-            str_repeat('Besedilo drugega odstavka. ', 90),  // ~2430 chars
-            str_repeat('Besedilo tretjega odstavka. ', 90), // ~2520 chars
+            str_repeat('Besedilo prvega odstavka. ', 50),   // ~1300 chars
+            str_repeat('Besedilo drugega odstavka. ', 50),  // ~1350 chars
+            str_repeat('Besedilo tretjega odstavka. ', 50), // ~1400 chars
         ]);
 
         $sections = [['heading' => 'Test', 'body' => $body]];
@@ -51,15 +51,15 @@ class TextChunkerTest extends TestCase
 
         $this->assertGreaterThan(1, count($chunks));
         foreach ($chunks as $chunk) {
-            // 550 token ceiling (target 500 + small tolerance for overlap text)
-            $this->assertLessThanOrEqual(550, $chunk['token_count'], "Chunk exceeded token limit");
+            // 350 token ceiling (target ~300 + tolerance for overlap text)
+            $this->assertLessThanOrEqual(350, $chunk['token_count'], "Chunk exceeded token limit");
         }
     }
 
     public function test_it_applies_overlap_between_consecutive_chunks(): void
     {
-        // Paragraphs: p1 ~840 chars, p2 ~840 chars → fits in one chunk (~1680).
-        // p3 ~840 chars would push it over 2000, forcing a split.
+        // Each paragraph ~870 chars. p1 alone fits (870 < 1200).
+        // p1+p2 = ~1740 > 1200, forcing a split after p1 with 120-char overlap into chunk 1.
         $p1 = str_repeat('Paragraph one sentence here. ', 30);   // ~870 chars
         $p2 = str_repeat('Paragraph two sentence here. ', 30);   // ~870 chars
         $p3 = str_repeat('Paragraph three sentence here. ', 30); // ~930 chars
@@ -70,8 +70,8 @@ class TextChunkerTest extends TestCase
 
         $this->assertGreaterThanOrEqual(2, count($chunks));
 
-        // The tail of chunk 0 must appear somewhere in chunk 1
-        $tailOfChunk0 = substr($chunks[0]['content'], -200);
+        // Extract only 100 chars from the tail — safely within the 120-char OVERLAP_CHARS
+        $tailOfChunk0 = substr($chunks[0]['content'], -100);
         $this->assertStringContainsString(
             trim($tailOfChunk0),
             $chunks[1]['content'],

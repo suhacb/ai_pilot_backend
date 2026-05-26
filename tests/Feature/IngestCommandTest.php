@@ -20,7 +20,7 @@ class IngestCommandTest extends TestCase
 {
     use RefreshDatabase;
 
-    private const DOCS_PATH    = 'private/docs';
+    private const DOCS_PATH    = 'docs';
     private const FILENAME     = 'test_fixture.docx';
     private const HTML_FILENAME = 'test_fixture.html';
 

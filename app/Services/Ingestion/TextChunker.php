@@ -4,8 +4,8 @@ namespace App\Services\Ingestion;
 
 class TextChunker
 {
-    private const TARGET_CHARS = 2000;  // ~500 tokens
-    private const OVERLAP_CHARS = 200;  // ~50 tokens
+    private const TARGET_CHARS  = 1200;  // ~300 tokens — safe for mxbai-embed-large's 512-token limit with Slovenian text
+    private const OVERLAP_CHARS = 120;   // ~30 tokens
 
     /**
      * Split an array of parsed sections into chunks with metadata.

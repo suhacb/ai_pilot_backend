@@ -22,7 +22,7 @@ class DocumentIngestionTest extends TestCase
 {
     use RefreshDatabase;
 
-    private const DOCS_PATH  = 'private/docs';
+    private const DOCS_PATH  = 'docs';
     private const FILENAME   = 'test_fixture.docx';
     private const CHUNK_COUNT = 2;
     private const VECTOR     = [0.1, 0.2, 0.3];

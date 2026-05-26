@@ -74,6 +74,60 @@ class QdrantStore
         }
     }
 
+    /**
+     * Delete all points in the collection that belong to a given document.
+     *
+     * @throws \RuntimeException on HTTP error
+     */
+    public function deleteByDocument(string $documentName): void
+    {
+        try {
+            $this->client->post("$this->url/collections/$this->collection/points/delete", [
+                'json' => [
+                    'filter' => [
+                        'must' => [[
+                            'key'   => 'document_name',
+                            'match' => ['value' => $documentName],
+                        ]],
+                    ],
+                ],
+            ]);
+        } catch (GuzzleException $e) {
+            throw new \RuntimeException(
+                "Qdrant deleteByDocument failed: {$e->getMessage()}",
+                0,
+                $e
+            );
+        }
+    }
+
+    /**
+     * Delete the collection entirely. No-op if it does not exist.
+     *
+     * @throws \RuntimeException on unexpected HTTP error
+     */
+    public function dropCollection(): void
+    {
+        try {
+            $this->client->delete("$this->url/collections/$this->collection");
+        } catch (ClientException $e) {
+            if ($e->getResponse()->getStatusCode() !== 404) {
+                throw new \RuntimeException(
+                    "Qdrant error dropping collection: {$e->getMessage()}",
+                    0,
+                    $e
+                );
+            }
+            // 404 → already gone, nothing to do
+        } catch (GuzzleException $e) {
+            throw new \RuntimeException(
+                "Qdrant connection error: {$e->getMessage()}",
+                0,
+                $e
+            );
+        }
+    }
+
     private function createCollection(int $vectorSize): void
     {
         try {

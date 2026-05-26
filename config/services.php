@@ -59,7 +59,7 @@ return [
     ],
 
     'documents' => [
-        'path' => env('DOCUMENTS_PATH', 'private/docs'),
+        'path' => env('DOCUMENTS_PATH', 'docs'),
     ],
 
 ];

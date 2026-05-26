@@ -114,6 +114,52 @@ HTML;
         $this->assertSame('Točka 1.1',    $sections[3]['heading']);
     }
 
+    public function test_it_parses_eur_lex_class_based_structure(): void
+    {
+        $html = <<<HTML
+<html><body>
+<div class="eli-title">POGLAVJE I</div>
+<p class="oj-normal">Uvodna določba poglavja.</p>
+<p class="oj-ti-art">Člen 1</p>
+<p class="oj-sti-art">Opredelitev pojmov</p>
+<p class="oj-normal">Vsebina prvega člena.</p>
+<p class="oj-ti-art">Člen 2</p>
+<p class="oj-normal">Vsebina drugega člena.</p>
+</body></html>
+HTML;
+
+        $sections = $this->parse($html);
+
+        $this->assertCount(3, $sections);
+        $this->assertSame('POGLAVJE I', $sections[0]['heading']);
+        $this->assertStringContainsString('Uvodna določba poglavja.', $sections[0]['body']);
+        $this->assertSame('Člen 1',     $sections[1]['heading']);
+        $this->assertStringContainsString('Vsebina prvega člena.',    $sections[1]['body']);
+        // oj-sti-art is skipped entirely
+        $this->assertStringNotContainsString('Opredelitev pojmov', $sections[1]['body']);
+        $this->assertSame('Člen 2',     $sections[2]['heading']);
+    }
+
+    public function test_it_falls_back_to_raw_body_text_when_no_paragraphs_or_headings_found(): void
+    {
+        // Simulates a PDF-converted HTML where text is split across <a> tags
+        // with no <p> or heading elements.
+        $html = <<<HTML
+<html><body>
+<a href="#">1. člen</a><a href="#"> — Ta zakon</a><a href="#"> ureja varnost.</a>
+<br/>
+<a href="#">2. člen</a><a href="#"> — Opredelitev pojmov.</a>
+</body></html>
+HTML;
+
+        $sections = $this->parse($html);
+
+        $this->assertCount(1, $sections);
+        $this->assertNull($sections[0]['heading']);
+        $this->assertStringContainsString('člen', $sections[0]['body']);
+        $this->assertStringContainsString('varnost', $sections[0]['body']);
+    }
+
     public function test_it_omits_sections_with_empty_body(): void
     {
         $html = <<<HTML

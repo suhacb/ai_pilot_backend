@@ -11,6 +11,7 @@ use App\Services\Ingestion\QdrantStore;
 use App\Services\Ingestion\TextChunker;
 use App\Services\Ingestion\ZincSearchStore;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
@@ -61,12 +62,18 @@ class IngestDocumentCommand extends Command
         $absolutePath = $disk->path($relativePath);
         $name         = pathinfo($filename, PATHINFO_FILENAME);
 
-        $document = Document::create([
-            'name'        => $name,
-            'file_path'   => $relativePath,
-            'source_type' => $sourceType,
-            'status'      => 'processing',
-        ]);
+        $document = Document::updateOrCreate(
+            ['file_path' => $relativePath],
+            [
+                'name'        => $name,
+                'source_type' => $sourceType,
+                'status'      => 'processing',
+                'chunk_count' => 0,
+                'ingested_at' => null,
+            ]
+        );
+
+        Log::info("Ingestion started", ['document' => $name, 'source_type' => $sourceType]);
 
         try {
             $sections = $extension === 'docx'
@@ -74,8 +81,11 @@ class IngestDocumentCommand extends Command
                 : $this->htmlParser->parse($absolutePath);
             $chunks   = $this->chunker->chunk($sections, $name, $sourceType);
 
+            Log::info("Parsed and chunked", ['document' => $name, 'chunks' => count($chunks), 'sections' => count($sections)]);
+
             if (empty($chunks)) {
                 $this->warn("No chunks produced — document may be empty.");
+                Log::warning("No chunks produced", ['document' => $name]);
                 $document->update(['status' => 'indexed', 'ingested_at' => now()]);
                 return self::SUCCESS;
             }
@@ -83,7 +93,10 @@ class IngestDocumentCommand extends Command
             $firstVector = $this->embedder->embed($chunks[0]['content']);
             $this->qdrant->ensureCollection(count($firstVector));
 
-            $total = count($chunks);
+            Log::info("Qdrant collection ready", ['document' => $name, 'dimensions' => count($firstVector)]);
+
+            $total   = count($chunks);
+            $indexed = 0;
 
             foreach ($chunks as $i => $chunk) {
                 if (DocumentChunk::where('content_hash', $chunk['content_hash'])->exists()) {
@@ -122,10 +135,14 @@ class IngestDocumentCommand extends Command
                     'token_count'   => $chunk['token_count'],
                 ]);
 
+                $indexed++;
                 $this->line("Chunk " . ($i + 1) . "/$total — '{$chunk['section_title']}'");
+
+                if ($indexed % 10 === 0) {
+                    Log::info("Indexing progress", ['document' => $name, 'indexed' => $indexed, 'total' => $total]);
+                }
             }
 
-            $indexed = DocumentChunk::where('document_id', $document->id)->count();
             $document->update([
                 'status'      => 'indexed',
                 'chunk_count' => $indexed,
@@ -133,10 +150,18 @@ class IngestDocumentCommand extends Command
             ]);
 
             $this->info("Done. $indexed chunks indexed for '$name'.");
+            Log::info("Ingestion complete", ['document' => $name, 'indexed' => $indexed, 'total' => $total]);
 
         } catch (\Throwable $e) {
             $document->update(['status' => 'failed']);
             $this->error($e->getMessage());
+            Log::error("Ingestion failed", [
+                'document'  => $name,
+                'error'     => $e->getMessage(),
+                'exception' => get_class($e),
+                'file'      => $e->getFile(),
+                'line'      => $e->getLine(),
+            ]);
             return self::FAILURE;
         }
 
