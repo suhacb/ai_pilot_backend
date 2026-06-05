@@ -2,8 +2,10 @@
 
 namespace App\Services\Agent;
 
+use App\Exceptions\GenerationCancelledException;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\GuzzleException;
+use Psr\Http\Message\StreamInterface;
 
 class OllamaClient
 {
@@ -12,22 +14,48 @@ class OllamaClient
         private readonly string $url,
     ) {}
 
+    /** Per-request in-memory cache to avoid repeated DB lookups per generate() call. */
+    private array $ctxCache = [];
+
+    /** Callable that returns true when the current generation should be aborted. */
+    private mixed $cancelCheck = null;
+
+    public function setCancelCheck(?callable $fn): void
+    {
+        $this->cancelCheck = $fn;
+    }
+
     /**
-     * Generate a completion from Ollama.
+     * Look up the registered context window for a model.
+     * Falls back to 8 192 if the model is not in the registry.
+     */
+    public function contextWindowFor(string $model): int
+    {
+        if (!array_key_exists($model, $this->ctxCache)) {
+            $this->ctxCache[$model] = \App\Models\OllamaModel::where('name', $model)->value('context_window') ?? 8192;
+        }
+        return $this->ctxCache[$model];
+    }
+
+    /**
+     * Generate a completion from Ollama using a streaming response so that
+     * a registered cancel check can abort mid-generation.
      *
      * @param  bool  $jsonFormat  When true, constrains output to JSON format (for ReAct loop).
      *                            Set false for synthesis calls that return natural prose.
      *
-     * @throws \RuntimeException on HTTP error
+     * @throws \RuntimeException               on HTTP error
+     * @throws GenerationCancelledException    when the cancel check returns true mid-stream
      */
     public function generate(string $prompt, string $model, bool $jsonFormat = true): string
     {
         $this->ensureOnlyModelLoaded($model);
 
         $payload = [
-            'model'  => $model,
-            'prompt' => $prompt,
-            'stream' => false,
+            'model'   => $model,
+            'prompt'  => $prompt,
+            'stream'  => true,
+            'options' => ['num_ctx' => $this->contextWindowFor($model)],
         ];
 
         if ($jsonFormat) {
@@ -36,7 +64,8 @@ class OllamaClient
 
         try {
             $response = $this->client->post("$this->url/api/generate", [
-                'json' => $payload,
+                'json'   => $payload,
+                'stream' => true,
             ]);
         } catch (GuzzleException $e) {
             throw new \RuntimeException(
@@ -46,9 +75,49 @@ class OllamaClient
             );
         }
 
-        $data = json_decode((string) $response->getBody(), true);
+        $body       = $response->getBody();
+        $result     = '';
+        $tokenCount = 0;
 
-        return $data['response'];
+        while (!$body->eof()) {
+            $line = $this->readStreamLine($body);
+            if ($line === '') {
+                continue;
+            }
+
+            $data = json_decode($line, true);
+            if (!is_array($data)) {
+                continue;
+            }
+
+            $result .= $data['response'] ?? '';
+
+            if ($data['done'] ?? false) {
+                break;
+            }
+
+            // Check cancellation every 20 tokens to keep cache lookups cheap.
+            $tokenCount++;
+            if ($tokenCount % 20 === 0 && $this->cancelCheck && ($this->cancelCheck)()) {
+                $body->close();
+                throw new GenerationCancelledException();
+            }
+        }
+
+        return $result;
+    }
+
+    private function readStreamLine(StreamInterface $body): string
+    {
+        $line = '';
+        while (!$body->eof()) {
+            $char = $body->read(1);
+            if ($char === "\n") {
+                break;
+            }
+            $line .= $char;
+        }
+        return trim($line);
     }
 
     /**

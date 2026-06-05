@@ -20,8 +20,15 @@ class OllamaEmbedder
      *
      * @throws \RuntimeException on HTTP error
      */
+    // mxbai-embed-large context limit is 512 tokens; Slovenian legal text tokenizes at ~2 chars/token with BERT WordPiece
+    private const MAX_CHARS = 900;
+
     public function embed(string $text): array
     {
+        if (mb_strlen($text) > self::MAX_CHARS) {
+            $text = mb_substr($text, 0, self::MAX_CHARS);
+        }
+
         try {
             $response = $this->client->post("$this->url/api/embed", [
                 'json' => [

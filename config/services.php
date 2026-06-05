@@ -38,7 +38,7 @@ return [
     'ollama' => [
         'url'               => env('OLLAMA_URL', 'http://ollama:11434'),
         'generative_model'  => env('OLLAMA_GENERATIVE_MODEL', 'gemma4:26b'),
-        'planning_model'    => env('OLLAMA_PLANNING_MODEL',   'gemma4:4b'),
+        'planning_model'    => env('OLLAMA_PLANNING_MODEL',   'gemma4:e4b'),
         'embedding_model'   => env('OLLAMA_EMBEDDING_MODEL',  'mxbai-embed-large'),
     ],
 

@@ -16,23 +16,23 @@ class SessionControllerTest extends TestCase
 
     public function test_it_creates_a_session_and_returns_session_id(): void
     {
-        $response = $this->postJson('/api/sessions', ['model' => 'gemma4:27b']);
+        $response = $this->postJson('/api/sessions', ['model' => 'gemma4:26b']);
 
         $response->assertStatus(201)
                  ->assertJsonStructure(['session_id', 'model']);
 
         $this->assertDatabaseCount('agent_sessions', 1);
-        $this->assertSame('gemma4:27b', AgentSession::first()->model_generative);
+        $this->assertSame('gemma4:26b', AgentSession::first()->model_generative);
     }
 
     public function test_it_stores_model_planning_when_provided(): void
     {
         $this->postJson('/api/sessions', [
-            'model'          => 'qwen2.5:32b',
-            'model_planning' => 'qwen2.5:7b',
+            'model'          => 'qwen3:14b:32b',
+            'model_planning' => 'qwen3:14b',
         ])->assertStatus(201);
 
-        $this->assertSame('qwen2.5:7b', AgentSession::first()->model_planning);
+        $this->assertSame('qwen3:14b', AgentSession::first()->model_planning);
     }
 
     public function test_it_uses_default_model_when_not_provided(): void
@@ -125,11 +125,11 @@ class SessionControllerTest extends TestCase
 
     // -------------------------------------------------------------------------
 
-    private function createSession(string $model = 'gemma4:27b'): AgentSession
+    private function createSession(string $model = 'gemma4:26b'): AgentSession
     {
         return AgentSession::create([
             'model_generative' => $model,
-            'model_planning'   => 'qwen2.5:7b',
+            'model_planning'   => 'qwen3:14b',
             'model_embedding'  => 'mxbai-embed-large',
         ]);
     }

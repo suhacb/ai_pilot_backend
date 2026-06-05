@@ -2,12 +2,15 @@
 
 namespace App\Services\Agent;
 
+use App\Exceptions\GenerationCancelledException;
 use App\Models\AgentSession;
 use App\Models\AgentStep;
 use App\Services\Agent\Tools\FulltextSearchTool;
 use App\Services\Agent\Tools\GetDocumentTool;
 use App\Services\Agent\Tools\SemanticSearchTool;
 use App\Services\Agent\Tools\WebSearchTool;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 
 class AgentOrchestrator
 {
@@ -33,53 +36,146 @@ class AgentOrchestrator
     {
         $planningModel   = $session->model_planning ?? $session->model_generative;
         $generativeModel = $session->model_generative;
+        $history         = $session->conversation_history ?? [];
 
-        $context = $this->buildSystemPrompt();
-        $context .= "\n\nUser query: " . $query . "\n";
+        $cacheKey = "agent:cancelled:{$session->id}";
+        $this->ollama->setCancelCheck(fn () => Cache::has($cacheKey));
+
+        try {
+        $relevance = $this->assessRelevance($query, $history, $planningModel);
+
+        if ($relevance['level'] === 'LOW') {
+            yield ['type' => 'answer', 'content' => $this->offTopicResponse($query, $generativeModel)];
+            return;
+        }
+
+        if ($relevance['level'] === 'MEDIUM') {
+            $this->appendTurn($session, $query, $relevance['message'], $history);
+            yield ['type' => 'answer', 'content' => $relevance['message']];
+            return;
+        }
+
+        if ($planningModel === $generativeModel) {
+            yield ['type' => 'step', 'message' => "Za odgovor na vaše vprašanje bom uporabil model {$generativeModel}."];
+        } else {
+            yield ['type' => 'step', 'message' => "Za načrtovanje korakov bom uporabil model {$planningModel}, za sintezo končnega odgovora pa model {$generativeModel}."];
+        }
+
+        // Planning context accumulates the full ReAct loop (including JSON instructions).
+        // Evidence is tracked separately so the synthesis prompt stays free of JSON instructions.
+        $planningContext  = $this->buildSystemPrompt($history);
+        $planningContext .= "\n\nVprašanje uporabnika: " . $query . "\n";
+        $evidence         = [];
+
+        $maxObsChars    = $this->maxObservationChars($this->ollama->contextWindowFor($planningModel));
+        $totalObsBudget = $maxObsChars * $this->maxIterations;
+        $totalObsChars  = 0;
+        $seenHashes     = [];
 
         for ($i = 0; $i < $this->maxIterations; $i++) {
-            $suffix = $i === 0
-                ? "\nProvide your first step as JSON:"
-                : "\nProvide your next step as JSON:";
+            $suffix  = $i === 0
+                ? "\nNavedi svoj prvi korak kot JSON:"
+                : "\nNavedi naslednji korak kot JSON:";
+            $prompt  = $planningContext . $suffix;
+            $raw     = $this->ollama->generate($prompt, $planningModel, true);
+            $step    = $this->parseResponse($raw, $i);
 
-            $raw  = $this->ollama->generate($context . $suffix, $planningModel, true);
-            $step = $this->parseResponse($raw);
+            Log::debug('[Agent] Step ' . $i, [
+                'session'          => $session->id,
+                'model'            => $planningModel,
+                'context_length'   => mb_strlen($prompt),
+                'obs_budget_used'  => $totalObsChars,
+                'obs_budget_total' => $totalObsBudget,
+                'action'           => $step['action'] ?? 'missing',
+                'raw_excerpt'      => mb_substr($raw, 0, 300),
+            ]);
 
             if (($step['action'] ?? '') === 'finish') {
-                $this->persistStep($session, $i, $step['reasoning'] ?? '', null, null, null);
-
-                $synthesisPrompt = $this->buildSynthesisPrompt($query, $context);
-                $finalAnswer     = $this->ollama->generate($synthesisPrompt, $generativeModel, false);
-
-                yield ['type' => 'answer', 'content' => $finalAnswer];
+                $this->persistStep($session, $i, $step['reasoning'] ?? '', null, null, null, $raw, mb_strlen($prompt));
+                if ($planningModel !== $generativeModel) {
+                    yield ['type' => 'step', 'message' => "Preklapljam na model {$generativeModel} za sintezo končnega odgovora."];
+                }
+                $answer = $this->synthesise($query, $evidence, $generativeModel);
+                $this->appendTurn($session, $query, $answer, $history);
+                yield ['type' => 'answer', 'content' => $answer];
                 return;
             }
 
-            $tool        = $step['action'] ?? 'unknown';
+            $tool        = $step['action'];
             $params      = $step['parameters'] ?? [];
             $observation = $this->dispatchTool($tool, $params);
 
-            $this->persistStep($session, $i, $step['reasoning'] ?? '', $tool, $params, $observation);
+            $obsHash = md5($observation);
+            if (isset($seenHashes[$obsHash])) {
+                Log::debug('[Agent] Skipping duplicate observation', ['step' => $i, 'tool' => $tool]);
+                $planningContext .= sprintf(
+                    "\nKorak %d:\nRazmišljanje: %s\nDejanje: %s(%s)\nOpazovanje: (enako kot prejšnji rezultat — preskočeno)\n",
+                    $i + 1, $step['reasoning'] ?? '', $tool, json_encode($params, JSON_UNESCAPED_UNICODE)
+                );
+                yield ['type' => 'step', 'message' => $this->stepMessage($tool, $params)];
+                continue;
+            }
+            $seenHashes[$obsHash] = true;
 
-            $context .= sprintf(
-                "\nStep %d:\nReasoning: %s\nAction: %s(%s)\nObservation: %s\n",
+            $evidence[] = [
+                'tool'        => $tool,
+                'params'      => $params,
+                'observation' => $observation,
+            ];
+
+            $this->persistStep($session, $i, $step['reasoning'] ?? '', $tool, $params, $observation, $raw, mb_strlen($prompt));
+
+            $condensed      = $this->condenseObservation($observation, $maxObsChars, $planningModel);
+            $totalObsChars += mb_strlen($condensed);
+
+            $planningContext .= sprintf(
+                "\nKorak %d:\nRazmišljanje: %s\nDejanje: %s(%s)\nOpazovanje: %s\n",
                 $i + 1,
                 $step['reasoning'] ?? '',
                 $tool,
                 json_encode($params, JSON_UNESCAPED_UNICODE),
-                $observation
+                $condensed
             );
 
             yield [
-                'type'          => 'step',
-                'reasoning'     => $step['reasoning'] ?? '',
-                'action_tool'   => $tool,
-                'action_params' => $params,
-                'observation'   => $observation,
+                'type'    => 'step',
+                'message' => $this->stepMessage($tool, $params),
             ];
+
+            if ($totalObsChars >= (int)($totalObsBudget * 0.9)) {
+                Log::info('[Agent] Observation budget exhausted — forcing synthesis', [
+                    'session' => $session->id, 'step' => $i,
+                    'used' => $totalObsChars, 'budget' => $totalObsBudget,
+                ]);
+                yield ['type' => 'step', 'message' => 'Kontekstno okno je zapolnjeno — zaključujem z iskanjem in pripravljam odgovor.'];
+                break;
+            }
         }
 
-        yield ['type' => 'answer', 'content' => 'Maximum iterations reached. Partial answer based on gathered information.'];
+        // Max iterations reached — synthesise from whatever was gathered
+        if ($planningModel !== $generativeModel) {
+            yield ['type' => 'step', 'message' => "Preklapljam na model {$generativeModel} za sintezo končnega odgovora."];
+        }
+        $answer = $this->synthesise($query, $evidence, $generativeModel);
+        $this->appendTurn($session, $query, $answer, $history);
+        yield ['type' => 'answer', 'content' => $answer];
+        } catch (GenerationCancelledException) {
+            yield ['type' => 'cancelled', 'message' => 'Generiranje je bilo prekinjeno.'];
+        } finally {
+            $this->ollama->setCancelCheck(null);
+            Cache::forget($cacheKey);
+        }
+    }
+
+    private function synthesise(string $query, array $evidence, string $model): string
+    {
+        $maxEvidenceChars = $this->maxEvidenceChars($this->ollama->contextWindowFor($model));
+
+        return $this->ollama->generate(
+            $this->buildSynthesisPrompt($query, $evidence, $maxEvidenceChars),
+            $model,
+            false
+        );
     }
 
     private function dispatchTool(string $tool, array $params): string
@@ -93,7 +189,7 @@ class AgentOrchestrator
         };
     }
 
-    private function parseResponse(string $raw): array
+    private function parseResponse(string $raw, int $stepIndex = -1): array
     {
         $cleaned = trim($raw);
         $cleaned = preg_replace('/^```(?:json)?\s*/m', '', $cleaned);
@@ -103,18 +199,36 @@ class AgentOrchestrator
         $data = json_decode($cleaned, true);
 
         if (!is_array($data)) {
-            // Try to extract a JSON object from anywhere in the string
             if (preg_match('/\{.*\}/s', $cleaned, $matches)) {
                 $data = json_decode($matches[0], true);
             }
         }
 
         if (!is_array($data)) {
-            return [
-                'reasoning'  => 'Failed to parse LLM response as JSON.',
-                'action'     => 'finish',
-                'parameters' => ['final_answer' => $raw],
-            ];
+            Log::warning('[Agent] Could not parse LLM output as JSON', [
+                'step' => $stepIndex,
+                'raw'  => mb_substr($raw, 0, 600),
+            ]);
+            return ['reasoning' => 'Failed to parse LLM response.', 'action' => 'finish', 'parameters' => []];
+        }
+
+        // Recover from common alternative key names the model sometimes uses
+        if (empty($data['action'])) {
+            $data['action'] = $data['tool'] ?? $data['tool_name'] ?? $data['function'] ?? $data['act'] ?? null;
+
+            if (empty($data['action']) && isset($data['function_call']['name'])) {
+                $data['action']     = $data['function_call']['name'];
+                $data['parameters'] = $data['parameters'] ?? $data['function_call']['arguments'] ?? [];
+            }
+        }
+
+        if (empty($data['action'])) {
+            Log::warning('[Agent] LLM response has no recognisable action field', [
+                'step'   => $stepIndex,
+                'parsed' => $data,
+                'raw'    => mb_substr($raw, 0, 600),
+            ]);
+            return array_merge($data, ['action' => 'finish', 'parameters' => []]);
         }
 
         return $data;
@@ -127,75 +241,280 @@ class AgentOrchestrator
         ?string $tool,
         ?array $params,
         ?string $observation,
+        ?string $rawLlmResponse = null,
+        ?int $contextLength = null,
     ): void {
         AgentStep::create([
-            'session_id'    => $session->id,
-            'step_index'    => $index,
-            'reasoning'     => $reasoning,
-            'action_tool'   => $tool,
-            'action_params' => $params,
-            'observation'   => $observation,
+            'session_id'       => $session->id,
+            'step_index'       => $index,
+            'reasoning'        => $reasoning,
+            'action_tool'      => $tool,
+            'action_params'    => $params,
+            'observation'      => $observation,
+            'raw_llm_response' => $rawLlmResponse,
+            'context_length'   => $contextLength,
         ]);
     }
 
-    private function buildSystemPrompt(): string
+    /**
+     * Assess the relevance of a query to the system's domain.
+     *
+     * Returns ['level' => 'HIGH'|'MEDIUM'|'LOW', 'message' => string|null].
+     * For MEDIUM, 'message' is a ready-to-send clarification in the user's language.
+     * For HIGH and LOW, 'message' is null.
+     *
+     * @param  array<array{user: string, agent: string}>  $history
+     */
+    private function assessRelevance(string $query, array $history, string $model): array
+    {
+        $contextBlock = '';
+        if (!empty($history)) {
+            $recent = array_slice($history, -2);
+            $lines  = [];
+            foreach ($recent as $turn) {
+                $lines[] = 'Uporabnik: ' . $turn['user'];
+                $lines[] = 'Asistent: ' . mb_substr($turn['agent'], 0, 200) . (mb_strlen($turn['agent']) > 200 ? '…' : '');
+            }
+            $contextBlock = "\nPredhodni pogovor (za kontekst):\n" . implode("\n", $lines) . "\n";
+        }
+
+        $prompt = <<<PROMPT
+Si klasifikator poizvedb za AI svetovalca za informacijsko varnost in skladnost z ZInfV-1.
+{$contextBlock}
+Sistem obravnava:
+- Informacijska varnost: sumljiva e-pošta, phishing, zlonamerna koda, vdori, nepooblaščen dostop
+- Varnostni incidenti in odziv nanje
+- Skladnost z ZInfV-1 in drugimi predpisi
+- Interne varnostne politike in postopki
+- Ocenjevanje tveganj dobaviteljev
+- Fizična varnost, varstvo osebnih podatkov
+- Vprašanja o vsebini internih dokumentov tega podjetja
+
+Poizvedba: {$query}
+
+Oceni relevantnost poizvedbe:
+- HIGH — poizvedba se jasno nanaša na informacijsko varnost, varnostne incidente, skladnost ali sorodna področja
+- MEDIUM — poizvedba bi lahko spadala v področje, a je dvoumna, prekratka ali premalo specifična; koristilo bi pojasnilo
+- LOW — poizvedba jasno ne spada v področje (npr. vreme, kuhanje, geografija, zabava)
+
+Odgovori z veljavnim JSON v točno tem formatu (brez dodatnega besedila):
+{
+  "level": "HIGH",
+  "message": null
+}
+
+Za MEDIUM vnesi v "message" prijazen odgovor v jeziku poizvedbe, ki pojasni, kaj je nejasno, in prosi za dodatne podrobnosti.
+Za HIGH in LOW pusti "message" kot null.
+PROMPT;
+
+        $raw  = $this->ollama->generate($prompt, $model, true);
+        $data = json_decode(trim($raw), true);
+
+        $level = strtoupper($data['level'] ?? '');
+        if (!in_array($level, ['HIGH', 'MEDIUM', 'LOW'], true)) {
+            Log::warning('[Agent] Unexpected relevance level, defaulting to HIGH', ['raw' => mb_substr($raw, 0, 300)]);
+            $level = 'HIGH';
+        }
+
+        Log::debug('[Agent] Relevance assessment', ['query' => $query, 'level' => $level]);
+
+        return [
+            'level'   => $level,
+            'message' => ($level === 'MEDIUM') ? ($data['message'] ?? null) : null,
+        ];
+    }
+
+    private function offTopicResponse(string $query, string $model): string
+    {
+        $prompt = <<<PROMPT
+Si asistent za informacijsko varnost v podjetju za fizično in tehnično varnost.
+
+Uporabnik je postavil vprašanje, ki ne spada v področje informacijske varnosti, varnostnih politik ali skladnosti z zakonodajo:
+
+Vprašanje: {$query}
+
+Napiši kratek, prijazen odgovor (2–3 stavke), v katerem:
+1. Pojasniš, da si specializiran za informacijsko varnost in skladnost z ZInfV-1.
+2. Predlagaš, kam se lahko uporabnik obrne za odgovor na to vprašanje.
+
+Odgovor napiši v istem jeziku kot vprašanje.
+PROMPT;
+
+        return $this->ollama->generate($prompt, $model, false);
+    }
+
+    /**
+     * Persist this turn's (query, answer) pair into the session's conversation history.
+     * Keeps the last 10 turns to bound context growth.
+     *
+     * @param  array<array{user: string, agent: string}>  $history
+     */
+    private function appendTurn(AgentSession $session, string $query, string $answer, array $history): void
+    {
+        $history[] = ['user' => $query, 'agent' => $answer];
+        $session->update(['conversation_history' => array_slice($history, -10)]);
+    }
+
+    private function stepMessage(string $tool, array $params): string
+    {
+        return match ($tool) {
+            'search_semantic' => 'Semantično iskanje: ' . ($params['query'] ?? ''),
+            'search_fulltext' => 'Iskanje po ključnih besedah: ' . ($params['query'] ?? ''),
+            'search_web'      => 'Spletno iskanje: ' . ($params['query'] ?? ''),
+            'get_document'    => 'Pridobivam dokument: ' . ($params['document_name'] ?? ''),
+            default           => 'Izvajam: ' . $tool,
+        };
+    }
+
+    /**
+     * @param  array<array{user: string, agent: string}>  $history
+     */
+    private function buildSystemPrompt(array $history = []): string
     {
         $tools = json_encode($this->toolDefinitions(), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
 
-        return <<<PROMPT
-You are an AI compliance advisor for a physical and technical security company subject to ZInfV-1 (Zakon o informacijski varnosti). You assist with three types of requests:
-1. Compliance gap analysis — identifying what is required vs. what is documented
-2. Incident response planning — classifying incidents and producing actionable response plans
-3. Supplier risk assessment — evaluating third-party risk against internal criteria and ZInfV-1
+        $historyBlock = '';
+        if (!empty($history)) {
+            $lines = [];
+            foreach (array_slice($history, -3) as $turn) {
+                $lines[] = 'Uporabnik: ' . $turn['user'];
+                $lines[] = 'Asistent: ' . mb_substr($turn['agent'], 0, 400) . (mb_strlen($turn['agent']) > 400 ? '…' : '');
+            }
+            $historyBlock = "\n\n=== Predhodni pogovor ===\n" . implode("\n", $lines) . "\n=== Konec predhodnega pogovora ===";
+        }
 
-You have access to the following tools:
+        return <<<PROMPT
+Si AI svetovalec za skladnost v podjetju za fizično in tehnično varnost, ki je zavezano ZInfV-1 (Zakon o informacijski varnosti). Pomagaš pri treh vrstah vprašanj:
+1. Analiza skladnostnih vrzeli — ugotavljanje, kaj je zahtevano in kaj je dokumentirano
+2. Načrtovanje odziva na incidente — razvrstitev incidentov in priprava akcijskega načrta
+3. Ocena tveganja dobaviteljev — vrednotenje tveganj tretjih oseb glede na interne kriterije in ZInfV-1
+
+Na voljo imaš naslednja orodja:
 
 {$tools}
 
-Always reason step by step before acting. Use tools to gather evidence before drawing conclusions. Cite documents and article numbers in your final answer.
+{$historyBlock}
 
-Search strategy:
-- For practical operational questions (passwords, access, backups, incidents, suppliers): search internal_policy FIRST, then legislation if needed.
-- For regulatory compliance questions (legal obligations, article requirements): search legislation FIRST, then internal_policy to check what is documented.
-- For gap analysis: always search both sources.
-- Prefer search_semantic for conceptual questions. Use search_fulltext when looking for specific article numbers or exact terms.
-- 2–4 tool calls are usually sufficient. Do not repeat the same search twice.
+Vedno razmišljaj korak za korakom, preden ukrepaš. Uporabi orodja za zbiranje dokazov, preden sklepaš. V odgovoru navedi konkretne dokumente in številke členov.
 
-IMPORTANT: Respond ONLY with valid JSON. No text outside the JSON object. Use exactly this format:
+Strategija iskanja:
+- Iskalne poizvedbe VEDNO piši v slovenščini — vsi dokumenti so v slovenščini, zato bo ujemanje najboljše.
+- **Faza 1 – Identifikacija dokumenta:** Začni z enim semantičnim ali polnotekstovnim iskanjem, da ugotoviš, kateri dokument je najpomembnejši. Iskalni rezultati vključujejo ime dokumenta (document_name) in oceno relevantnosti (score).
+- **Faza 2 – Pridobitev dokumenta:** Če je kateri dokument jasno relevanten (visoka ocena ali smiselno ime), uporabi get_document za pridobitev celotnega dokumenta ali konkretnega razdelka. Uporabi natanko tisto ime dokumenta, kot je prikazano v rezultatih iskanja.
+- **Širše iskanje:** Nadaljuj z dodatnimi iskanji, če noben dokument ni dovolj jasen zadetek, ali če vprašanje zahteva analizo več virov.
+- Za praktična operativna vprašanja (gesla, dostopi, varnostne kopije, incidenti, dobavitelji): najprej išči v internal_policy.
+- Za vprašanja o regulativni skladnosti (zakonske obveznosti, zahteve členov): najprej išči v legislation.
+- Za analizo vrzeli: vedno išči v obeh virih.
+- Za konceptualna vprašanja raje uporabi search_semantic. Za iskanje konkretnih številk členov ali točnih izrazov uporabi search_fulltext.
+- Vedno izvedi vsaj 2 iskalna klica pred zaključkom.
+- Ne ponavljaj istega iskanja dvakrat.
+
+POMEMBNO: Odgovori IZKLJUČNO z veljavnim JSON. Brez besedila zunaj JSON objekta. Uporabi natanko ta format:
 
 {
-  "reasoning": "Your step-by-step reasoning about what to do next",
-  "action": "tool_name",
+  "reasoning": "Tvoje razmišljanje korak za korakom o naslednjem dejanju",
+  "action": "ime_orodja",
   "parameters": { ... }
 }
 
-When you have gathered sufficient information, use action "finish":
+Ko si zbral dovolj informacij, uporabi action "finish":
 
 {
-  "reasoning": "Your reasoning for the final answer",
+  "reasoning": "Povzetek tega, kar si ugotovil",
   "action": "finish",
-  "parameters": {
-    "final_answer": "Your complete, structured answer with citations"
-  }
+  "parameters": {}
 }
-
-Respond in the same language as the user's query. For Slovenian queries, answer in Slovenian.
 PROMPT;
     }
 
-    private function buildSynthesisPrompt(string $query, string $gatheredContext): string
+    /**
+     * Build a clean synthesis prompt that contains ONLY the search evidence and the query.
+     * Must never include the planning system prompt, which instructs the model to respond in JSON.
+     *
+     * @param  array<array{tool: string, params: array, observation: string}>  $evidence
+     */
+    private function buildSynthesisPrompt(string $query, array $evidence, int $maxEvidenceChars = 20000): string
     {
+        if (empty($evidence)) {
+            $evidenceText = 'Iskanje ni vrnilo rezultatov.';
+        } else {
+            $parts = [];
+            foreach ($evidence as $idx => $e) {
+                $parts[] = sprintf(
+                    "--- Najdeni odlomki %d (orodje: %s, parametri: %s) ---\n%s",
+                    $idx + 1,
+                    $e['tool'],
+                    json_encode($e['params'], JSON_UNESCAPED_UNICODE),
+                    $this->truncateObservation($e['observation'], (int)($maxEvidenceChars / max(1, count($evidence))))
+                );
+            }
+            $evidenceText = implode("\n\n", $parts);
+        }
+
         return <<<PROMPT
-You are an AI compliance advisor for a physical and technical security company subject to ZInfV-1.
+Si strokovni svetovalec za informacijsko varnost in skladnost z ZInfV-1 v podjetju za fizično in tehnično varnost.
 
-Below is a research process that was performed to answer the user's query. Review all gathered information and synthesize a comprehensive, well-structured final answer.
+Na podlagi spodnjih odlomkov iz internih dokumentov in zakonodaje pripravi jasen, strukturiran odgovor na vprašanje. Upoštevaj naslednja pravila:
+- Odgovor mora temeljiti izključno na prikazanih odlomkih.
+- Navedi konkretne dokumente ali člene, na katere se sklicuješ.
+- Strukturiraj odgovor z naslovi in alinejami, kjer je smiselno.
+- Odgovarjaj v istem jeziku kot vprašanje.
+- Ne izmišljuj informacij, ki jih v odlomkih ni.
 
-{$gatheredContext}
+Najdeni odlomki:
 
-Original query: {$query}
+{$evidenceText}
 
-Write a clear, structured answer based on the above research. Cite specific documents and article numbers where relevant. Respond in the same language as the user's query (Slovenian queries require a Slovenian answer).
+Vprašanje: {$query}
+
+Odgovor:
 PROMPT;
+    }
+
+    /**
+     * Maximum characters for a single tool observation appended to the planning context.
+     * Reserves ~35% of the context for system prompt, query, and per-step reasoning overhead,
+     * then distributes the remainder evenly across max iterations.
+     * Uses 3.5 chars/token as a conservative estimate for Slovenian text.
+     */
+    private function maxObservationChars(int $contextWindow): int
+    {
+        $availableTokens = (int)($contextWindow * 0.65) - 1000;
+        $tokensPerStep   = (int)(max(0, $availableTokens) / $this->maxIterations);
+        return max(1000, (int)($tokensPerStep * 3.5));
+    }
+
+    /**
+     * Maximum total characters of evidence passed to the synthesis prompt.
+     * Reserves 40% of the context for the system prompt, query, and generated answer.
+     */
+    private function maxEvidenceChars(int $contextWindow): int
+    {
+        return max(4000, (int)($contextWindow * 0.6 * 3.5));
+    }
+
+    private function condenseObservation(string $text, int $maxChars, string $model): string
+    {
+        if (mb_strlen($text) <= $maxChars) {
+            return $text;
+        }
+        $targetWords = (int)($maxChars / 5);
+        $prompt = <<<PROMPT
+Povzemi naslednje besedilo v največ {$targetWords} besedah. Ohrani vse konkretne navedbe dokumentov, členov, naslovov in postopkov. Izpusti ponavljajoče se vsebine.
+
+{$text}
+
+Povzetek:
+PROMPT;
+        return $this->ollama->generate($prompt, $model, false);
+    }
+
+    private function truncateObservation(string $text, int $maxChars): string
+    {
+        if (mb_strlen($text) <= $maxChars) {
+            return $text;
+        }
+        return mb_substr($text, 0, $maxChars) . "\n[... skrčeno — preseže okno konteksta ...]";
     }
 
     private function toolDefinitions(): array
@@ -203,34 +522,34 @@ PROMPT;
         return [
             [
                 'name'        => 'search_semantic',
-                'description' => 'Search the compliance knowledge base using semantic similarity. Best for conceptual questions, finding related policies, or when exact wording is unknown.',
+                'description' => 'Išči po zbirki znanja z semantično podobnostjo. Najboljše za konceptualna vprašanja, iskanje politik ali ko točno besedilo ni znano. Poizvedbo VEDNO napiši v slovenščini. Rezultati vsebujejo ime dokumenta (document_name) in oceno ujemanja (score) — uporabi jih za odločitev o get_document.',
                 'parameters'  => [
-                    'query'              => 'string — the search query',
-                    'top_k'              => 'integer — number of results (default 5)',
-                    'filter_source_type' => 'string — optional: internal_policy | legislation',
+                    'query'              => 'string — iskalna poizvedba v slovenščini',
+                    'top_k'              => 'integer — število rezultatov (privzeto 5)',
+                    'filter_source_type' => 'string — neobvezno: internal_policy | legislation',
                 ],
             ],
             [
                 'name'        => 'search_fulltext',
-                'description' => 'Search the compliance knowledge base using BM25 keyword matching. Best for finding specific article numbers, defined terms, or exact phrases.',
+                'description' => 'Išči po zbirki znanja z BM25 ključnimi besedami. Najboljše za iskanje konkretnih številk členov, definiranih izrazov ali točnih besednih zvez. Poizvedbo VEDNO napiši v slovenščini. Rezultati vsebujejo ime dokumenta (document_name) — uporabi ga za get_document.',
                 'parameters'  => [
-                    'query' => 'string — keywords or phrase',
-                    'top_k' => 'integer — number of results (default 5)',
+                    'query' => 'string — ključne besede ali besedna zveza v slovenščini',
+                    'top_k' => 'integer — število rezultatov (privzeto 5)',
                 ],
             ],
             [
                 'name'        => 'search_web',
-                'description' => 'Search the public web via local SearXNG. Use for current regulatory guidance, public supplier information, or recent incidents.',
+                'description' => 'Išči po javnem spletu prek lokalnega SearXNG. Uporabi za aktualne regulativne smernice, javne informacije o dobaviteljih ali nedavne incidente.',
                 'parameters'  => [
-                    'query' => 'string — the search query',
+                    'query' => 'string — iskalna poizvedba',
                 ],
             ],
             [
                 'name'        => 'get_document',
-                'description' => 'Retrieve the full text of a specific document, or a specific section within it.',
+                'description' => 'Pridobi celoten dokument ali konkreten razdelek. Uporabi po iskanju, ko je jasno kateri dokument vsebuje relevantne informacije. Ime dokumenta (document_name) mora biti natanko tako, kot je prikazano v rezultatih iskanja.',
                 'parameters'  => [
-                    'document_name' => 'string',
-                    'section_title' => 'string — optional',
+                    'document_name' => 'string — ime dokumenta, kot je prikazano v rezultatih iskanja',
+                    'section_title' => 'string — neobvezno, ime razdelka za ožjo pridobitev',
                 ],
             ],
         ];

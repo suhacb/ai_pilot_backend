@@ -11,7 +11,7 @@ class ModelControllerTest extends TestCase
 
     public function test_it_returns_models_with_roles(): void
     {
-        $this->bindOllamaClient(['gemma4:27b', 'gemma4:4b', 'mxbai-embed-large']);
+        $this->bindOllamaClient(['gemma4:26b', 'gemma4:e4b', 'mxbai-embed-large']);
 
         $this->getJson('/api/models')
              ->assertStatus(200)
@@ -21,14 +21,14 @@ class ModelControllerTest extends TestCase
 
     public function test_it_marks_the_configured_embedding_model_correctly(): void
     {
-        $this->bindOllamaClient(['gemma4:27b', 'mxbai-embed-large']);
+        $this->bindOllamaClient(['gemma4:26b', 'mxbai-embed-large']);
 
         $response = $this->getJson('/api/models')->assertStatus(200);
 
         $models = collect($response->json());
 
         $this->assertSame('embedding',  $models->firstWhere('name', 'mxbai-embed-large')['role']);
-        $this->assertSame('generative', $models->firstWhere('name', 'gemma4:27b')['role']);
+        $this->assertSame('generative', $models->firstWhere('name', 'gemma4:26b')['role']);
     }
 
     public function test_it_returns_empty_array_when_ollama_has_no_models(): void

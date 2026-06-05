@@ -17,6 +17,35 @@ class ZincSearchStore
     ) {}
 
     /**
+     * Drop the entire index so re-ingestion starts clean.
+     *
+     * @throws \RuntimeException on HTTP error
+     */
+    public function dropIndex(): void
+    {
+        try {
+            $this->client->delete("$this->url/api/index/$this->index", [
+                'auth' => [$this->user, $this->password],
+            ]);
+        } catch (ClientException $e) {
+            if ($e->getResponse()->getStatusCode() !== 404) {
+                throw new \RuntimeException(
+                    "ZincSearch dropIndex failed: {$e->getMessage()}",
+                    0,
+                    $e
+                );
+            }
+            // 404 → index did not exist, nothing to drop
+        } catch (GuzzleException $e) {
+            throw new \RuntimeException(
+                "ZincSearch dropIndex failed: {$e->getMessage()}",
+                0,
+                $e
+            );
+        }
+    }
+
+    /**
      * Delete all indexed chunks belonging to a given document.
      *
      * @throws \RuntimeException on HTTP error

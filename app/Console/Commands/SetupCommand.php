@@ -6,6 +6,7 @@ use App\Jobs\IngestDocumentJob;
 use App\Models\Document;
 use App\Models\DocumentChunk;
 use App\Services\Ingestion\QdrantStore;
+use App\Services\Ingestion\ZincSearchStore;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -53,8 +54,10 @@ class SetupCommand extends Command
         ['filename' => 'TRACEABILITY MATRIX – TVEGANJA, KONTROLE IN DOKUMENTI.docx',                   'source_type' => 'internal_policy'],
     ];
 
-    public function __construct(private readonly QdrantStore $qdrant)
-    {
+    public function __construct(
+        private readonly QdrantStore $qdrant,
+        private readonly ZincSearchStore $zinc,
+    ) {
         parent::__construct();
     }
 
@@ -62,6 +65,8 @@ class SetupCommand extends Command
     {
         $this->line('Wiping Qdrant collection...');
         $this->qdrant->dropCollection();
+        $this->line('Wiping ZincSearch index...');
+        $this->zinc->dropIndex();
         $this->line('Wiping document records from MySQL...');
         DB::statement('SET FOREIGN_KEY_CHECKS=0');
         DocumentChunk::truncate();

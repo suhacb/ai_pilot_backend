@@ -2,30 +2,34 @@
 
 namespace App\Http\Controllers;
 
-use App\Services\Agent\OllamaClient;
+use App\Models\OllamaModel;
 use Illuminate\Http\JsonResponse;
 
 class ModelController extends Controller
 {
-    public function __construct(
-        private readonly OllamaClient $ollama,
-    ) {}
-
     /**
      * GET /api/models
-     * List all models available in Ollama, annotated with their role.
+     * List all non-deleted registered models with their status.
+     * Returns both active and inactive models so the full registry is visible.
      */
     public function index(): JsonResponse
     {
-        $embeddingModel = config('services.ollama.embedding_model');
-
-        $models = collect($this->ollama->listModels())
-            ->map(fn(string $name) => [
-                'name' => $name,
-                'role' => $name === $embeddingModel ? 'embedding' : 'generative',
-            ])
-            ->values();
+        $models = OllamaModel::orderBy('role')
+            ->orderBy('display_name')
+            ->get(['id', 'name', 'display_name', 'role', 'context_window', 'is_active']);
 
         return response()->json($models);
+    }
+
+    /**
+     * DELETE /api/models/{id}
+     * Unregister a model by soft-deleting it.
+     * Active sessions using this model are unaffected until they complete.
+     */
+    public function destroy(int $id): JsonResponse
+    {
+        $model = OllamaModel::findOrFail($id);
+        $model->delete();
+        return response()->json(['deleted' => true]);
     }
 }

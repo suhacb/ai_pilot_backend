@@ -13,6 +13,8 @@ class AgentStep extends Model
         'action_tool',
         'action_params',
         'observation',
+        'raw_llm_response',
+        'context_length',
     ];
 
     protected function casts(): array

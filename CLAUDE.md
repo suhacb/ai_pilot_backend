@@ -60,7 +60,7 @@ The agent decides which use case it is addressing based on the incoming prompt �
 │                                                         │
 │  ┌──────────────────────────────────────────────────┐  │
 │  │                  Ollama (local)                   │  │
-│  │   Generative: gemma4:27b / gemma4:4b / qwen      │  │
+│  │   Generative: gemma4:26b / gemma4:e4b / qwen      │  │
 │  │   Embedding:  mxbai-embed-large                  │  │
 │  └──────────────────────────────────────────────────┘  │
 │                                                         │
@@ -79,7 +79,7 @@ The agent decides which use case it is addressing based on the incoming prompt �
 |---|---|---|
 | Language / Framework | PHP 8.3 + Laravel 11 | Existing internal framework preference |
 | LLM inference | Ollama (local) | All models run on-device |
-| Generative models | `gemma4:27b`, `gemma4:4b`, `qwen2.5:72b`, `qwen2.5:7b` | Selectable per request; small model for planning, large for synthesis |
+| Generative models | `gemma4:26b`, `gemma4:e4b`, `qwen3:14b`, `qwen3:14b` | Selectable per request; small model for planning, large for synthesis |
 | Embedding model | `mxbai-embed-large` via Ollama | Multilingual, handles Slovenian well |
 | Vector store | Qdrant | Semantic similarity search over document chunks |
 | Full-text search | ZincSearch | BM25 keyword search; hybrid search with Qdrant |
@@ -94,8 +94,8 @@ The agent decides which use case it is addressing based on the incoming prompt �
 
 The system supports multiple LLM models simultaneously, selectable at query time. This is intentional — the demo must show this as a feature. Design considerations:
 
-- **Small/fast model** (`gemma4:4b` or `qwen2.5:7b`): used for intent classification, step planning, and tool call generation in the ReAct loop. Low latency, visible "thinking" steps.
-- **Large/capable model** (`gemma4:27b` or `qwen2.5:72b`): used for final answer synthesis when the agent has gathered all relevant context.
+- **Small/fast model** (`gemma4:e4b` or `qwen3:14b`): used for intent classification, step planning, and tool call generation in the ReAct loop. Low latency, visible "thinking" steps.
+- **Large/capable model** (`gemma4:26b` or `qwen3:14b`): used for final answer synthesis when the agent has gathered all relevant context.
 - **Model selection** is configurable per session via the API, stored in session context.
 - The frontend allows the user to switch models to demonstrate the difference live.
 
@@ -242,7 +242,7 @@ Create a new agent session. Returns `session_id`.
 **Body:**
 ```json
 {
-  "model": "gemma4:27b",
+  "model": "gemma4:26b",
   "stream": true
 }
 ```
@@ -281,7 +281,7 @@ List available Ollama models with their roles (generative / embedding).
 ```dotenv
 # Ollama
 OLLAMA_URL=http://ollama:11434
-OLLAMA_GENERATIVE_MODEL=gemma4:27b
+OLLAMA_GENERATIVE_MODEL=gemma4:26b
 OLLAMA_EMBEDDING_MODEL=mxbai-embed-large
 
 # Qdrant
@@ -330,5 +330,5 @@ Prepare three scripted prompts (compliance, incident, supplier) with known good 
 - **No external LLM API calls.** All inference through local Ollama. Enforce this at the service layer — no OpenAI/Anthropic/Google SDK imports.
 - **No external data exfiltration.** SearXNG is self-hosted; it proxies web search without identifying the client.
 - **Slovenian language.** Documents and queries are primarily in Slovenian. The embedding model and generative models must handle this well. Do not assume English-only behavior.
-- **Demo latency.** On M5 Pro with 24GB RAM, `gemma4:27b` at 4-bit quantization should achieve acceptable token generation speed. If latency is problematic, fall back to `gemma4:4b` for planning steps and reserve the large model for final synthesis only.
+- **Demo latency.** On M5 Pro with 24GB RAM, `gemma4:26b` at 4-bit quantization should achieve acceptable token generation speed. If latency is problematic, fall back to `gemma4:e4b` for planning steps and reserve the large model for final synthesis only.
 - **3-day build window.** Avoid over-engineering. Prefer explicit, readable service classes over clever abstractions. The code will be shown to a client — it should be explainable.
