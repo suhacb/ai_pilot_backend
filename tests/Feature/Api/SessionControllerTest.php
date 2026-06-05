@@ -77,6 +77,38 @@ class SessionControllerTest extends TestCase
         $this->assertStringContainsString('[DONE]', $content);
     }
 
+    public function test_it_emits_session_title_event_and_persists_title_on_first_query(): void
+    {
+        $session = $this->createSession();
+        $this->bindOrchestratorStub($session, [
+            ['type' => 'answer', 'content' => 'Odgovor.'],
+        ]);
+
+        $content = $this->streamedContent("/api/sessions/{$session->id}/query", ['prompt' => 'test']);
+
+        $this->assertStringContainsString('"type":"session_title"', $content);
+        $this->assertStringContainsString('Testni naslov', $content);
+        $this->assertSame('Testni naslov', $session->fresh()->title);
+    }
+
+    public function test_it_does_not_emit_session_title_on_subsequent_queries(): void
+    {
+        $session = AgentSession::create([
+            'model_generative' => 'gemma4:26b',
+            'model_planning'   => 'qwen3:14b',
+            'model_embedding'  => 'mxbai-embed-large',
+            'model_locked'     => true,
+            'title'            => 'Obstoječi naslov',
+        ]);
+        $this->bindOrchestratorStub($session, [
+            ['type' => 'answer', 'content' => 'Odgovor.'],
+        ]);
+
+        $content = $this->streamedContent("/api/sessions/{$session->id}/query", ['prompt' => 'test']);
+
+        $this->assertStringNotContainsString('"type":"session_title"', $content);
+    }
+
     public function test_it_returns_422_when_prompt_is_missing(): void
     {
         $session = $this->createSession();
@@ -144,6 +176,7 @@ class SessionControllerTest extends TestCase
     private function bindOrchestratorStub(AgentSession $session, array $events): void
     {
         $stub = $this->createMock(AgentOrchestrator::class);
+        $stub->method('generateTitle')->willReturn('Testni naslov');
         $stub->method('run')->willReturnCallback(function () use ($events) {
             yield from $events;
         });

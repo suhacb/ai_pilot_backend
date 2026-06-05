@@ -15,6 +15,7 @@ class AgentSession extends Model
         'model_planning',
         'model_embedding',
         'model_locked',
+        'title',
         'use_case_detected',
         'conversation_history',
     ];

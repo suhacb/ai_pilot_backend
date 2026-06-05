@@ -64,10 +64,7 @@ class AgentOrchestrator
         $planningContext .= "\n\nVprašanje uporabnika: " . $query . "\n";
         $evidence         = [];
 
-        $maxObsChars    = $this->maxObservationChars($this->ollama->contextWindowFor($planningModel));
-        $totalObsBudget = $maxObsChars * $this->maxIterations;
-        $totalObsChars  = 0;
-        $seenHashes     = [];
+        $seenHashes = [];
 
         for ($i = 0; $i < $this->maxIterations; $i++) {
             $suffix  = $i === 0
@@ -78,13 +75,11 @@ class AgentOrchestrator
             $step    = $this->parseResponse($raw, $i);
 
             Log::debug('[Agent] Step ' . $i, [
-                'session'          => $session->id,
-                'model'            => $planningModel,
-                'context_length'   => mb_strlen($prompt),
-                'obs_budget_used'  => $totalObsChars,
-                'obs_budget_total' => $totalObsBudget,
-                'action'           => $step['action'] ?? 'missing',
-                'raw_excerpt'      => mb_substr($raw, 0, 300),
+                'session'        => $session->id,
+                'model'          => $planningModel,
+                'context_length' => mb_strlen($prompt),
+                'action'         => $step['action'] ?? 'missing',
+                'raw_excerpt'    => mb_substr($raw, 0, 300),
             ]);
 
             if (($step['action'] ?? '') === 'finish') {
@@ -120,10 +115,9 @@ class AgentOrchestrator
                 'observation' => $observation,
             ];
 
-            $this->persistStep($session, $i, $step['reasoning'] ?? '', $tool, $params, $observation, $raw, mb_strlen($prompt));
+            $planningNote = $this->planningNoteFor($tool, $params, $observation);
 
-            $condensed      = $this->condenseObservation($observation, $maxObsChars, $planningModel);
-            $totalObsChars += mb_strlen($condensed);
+            $this->persistStep($session, $i, $step['reasoning'] ?? '', $tool, $params, $planningNote, $raw, mb_strlen($prompt));
 
             $planningContext .= sprintf(
                 "\nKorak %d:\nRazmišljanje: %s\nDejanje: %s(%s)\nOpazovanje: %s\n",
@@ -131,22 +125,13 @@ class AgentOrchestrator
                 $step['reasoning'] ?? '',
                 $tool,
                 json_encode($params, JSON_UNESCAPED_UNICODE),
-                $condensed
+                $planningNote
             );
 
             yield [
                 'type'    => 'step',
                 'message' => $this->stepMessage($tool, $params),
             ];
-
-            if ($totalObsChars >= (int)($totalObsBudget * 0.9)) {
-                Log::info('[Agent] Observation budget exhausted — forcing synthesis', [
-                    'session' => $session->id, 'step' => $i,
-                    'used' => $totalObsChars, 'budget' => $totalObsBudget,
-                ]);
-                yield ['type' => 'step', 'message' => 'Kontekstno okno je zapolnjeno — zaključujem z iskanjem in pripravljam odgovor.'];
-                break;
-            }
         }
 
         // Max iterations reached — synthesise from whatever was gathered
@@ -158,6 +143,15 @@ class AgentOrchestrator
         yield ['type' => 'answer', 'content' => $answer];
         } catch (GenerationCancelledException) {
             yield ['type' => 'cancelled', 'message' => 'Generiranje je bilo prekinjeno.'];
+        } catch (\Throwable $e) {
+            Log::error('[Agent] Unhandled exception in ReAct loop', [
+                'session' => $session->id,
+                'error'   => $e->getMessage(),
+                'class'   => get_class($e),
+                'file'    => $e->getFile(),
+                'line'    => $e->getLine(),
+            ]);
+            yield ['type' => 'error', 'message' => 'Prišlo je do napake pri obdelavi vašega vprašanja. Prosimo, poskusite znova.'];
         } finally {
             $this->ollama->setCancelCheck(null);
             Cache::forget($cacheKey);
@@ -251,6 +245,28 @@ class AgentOrchestrator
             'raw_llm_response' => $rawLlmResponse,
             'context_length'   => $contextLength,
         ]);
+    }
+
+    /**
+     * Generate a short session title (≤ 5 words) from the user's first prompt.
+     * Falls back to a truncated version of the prompt on any failure.
+     */
+    public function generateTitle(string $prompt, string $model): string
+    {
+        $titlePrompt = <<<PROMPT
+Napiši kratek naslov (največ 5 besed) za pogovor, ki se začne z naslednjim vprašanjem. Naslov mora biti jedrnat in opisati temo. Odgovori SAMO z naslovom, brez narekovajev, pik ali dodatnega besedila.
+
+Vprašanje: {$prompt}
+
+Naslov:
+PROMPT;
+
+        try {
+            $title = trim($this->ollama->generate($titlePrompt, $model, false));
+            return mb_substr($title, 0, 100);
+        } catch (\Throwable) {
+            return mb_substr($prompt, 0, 60);
+        }
     }
 
     /**
@@ -396,14 +412,15 @@ Vedno razmišljaj korak za korakom, preden ukrepaš. Uporabi orodja za zbiranje 
 
 Strategija iskanja:
 - Iskalne poizvedbe VEDNO piši v slovenščini — vsi dokumenti so v slovenščini, zato bo ujemanje najboljše.
-- **Faza 1 – Identifikacija dokumenta:** Začni z enim semantičnim ali polnotekstovnim iskanjem, da ugotoviš, kateri dokument je najpomembnejši. Iskalni rezultati vključujejo ime dokumenta (document_name) in oceno relevantnosti (score).
+- **Faza 1 – Obvezno dvojno iskanje:** Za VSAKO vprašanje MORAŠ izvesti OBA spodnja klica, preden narediš karkoli drugega:
+  1. `search_semantic` — semantično iskanje za konceptualno ujemanje
+  2. `search_fulltext` — ključnobesedno iskanje za točne izraze in številke členov
+  Šele ko sta oba klica zaključena, smeš uporabiti get_document ali zaključiti.
 - **Faza 2 – Pridobitev dokumenta:** Če je kateri dokument jasno relevanten (visoka ocena ali smiselno ime), uporabi get_document za pridobitev celotnega dokumenta ali konkretnega razdelka. Uporabi natanko tisto ime dokumenta, kot je prikazano v rezultatih iskanja.
 - **Širše iskanje:** Nadaljuj z dodatnimi iskanji, če noben dokument ni dovolj jasen zadetek, ali če vprašanje zahteva analizo več virov.
-- Za praktična operativna vprašanja (gesla, dostopi, varnostne kopije, incidenti, dobavitelji): najprej išči v internal_policy.
-- Za vprašanja o regulativni skladnosti (zakonske obveznosti, zahteve členov): najprej išči v legislation.
-- Za analizo vrzeli: vedno išči v obeh virih.
-- Za konceptualna vprašanja raje uporabi search_semantic. Za iskanje konkretnih številk členov ali točnih izrazov uporabi search_fulltext.
-- Vedno izvedi vsaj 2 iskalna klica pred zaključkom.
+- Za praktična operativna vprašanja (gesla, dostopi, varnostne kopije, incidenti, dobavitelji): dodaj filter `internal_policy` pri search_semantic.
+- Za vprašanja o regulativni skladnosti (zakonske obveznosti, zahteve členov): dodaj filter `legislation` pri search_semantic.
+- Za analizo vrzeli: ne filtriraj — išči po vseh virih.
 - Ne ponavljaj istega iskanja dvakrat.
 
 POMEMBNO: Odgovori IZKLJUČNO z veljavnim JSON. Brez besedila zunaj JSON objekta. Uporabi natanko ta format:
@@ -469,16 +486,36 @@ PROMPT;
     }
 
     /**
-     * Maximum characters for a single tool observation appended to the planning context.
-     * Reserves ~35% of the context for system prompt, query, and per-step reasoning overhead,
-     * then distributes the remainder evenly across max iterations.
-     * Uses 3.5 chars/token as a conservative estimate for Slovenian text.
+     * Compact summary of a tool result for the planning context.
+     *
+     * The planning model only needs to know *what was found* (document names, scores,
+     * result count) to decide its next action — it does not need the full chunk text.
+     * Full text is preserved in $evidence[] and reaches the model only at synthesis time,
+     * keeping the planning context small and eliminating the need for LLM-based condensation.
      */
-    private function maxObservationChars(int $contextWindow): int
+    private function planningNoteFor(string $tool, array $params, string $observation): string
     {
-        $availableTokens = (int)($contextWindow * 0.65) - 1000;
-        $tokensPerStep   = (int)(max(0, $availableTokens) / $this->maxIterations);
-        return max(1000, (int)($tokensPerStep * 3.5));
+        return match ($tool) {
+            'search_semantic', 'search_fulltext' => $this->extractSearchHeaders($observation),
+            default => mb_substr($observation, 0, 300) . (mb_strlen($observation) > 300 ? '…' : ''),
+        };
+    }
+
+    /**
+     * Extract only the header lines from a RagRetriever-formatted search result.
+     * Each header is "[N] Dokument: X | Razdelek: Y | Score" — one line per chunk.
+     * The full content lines are dropped; they go to $evidence[] instead.
+     */
+    private function extractSearchHeaders(string $observation): string
+    {
+        preg_match_all('/^\[\d+\] Dokument:.*$/m', $observation, $matches);
+
+        if (empty($matches[0])) {
+            return mb_substr($observation, 0, 200);
+        }
+
+        $firstLine = trim(explode("\n", $observation)[0]);
+        return $firstLine . "\n" . implode("\n", $matches[0]);
     }
 
     /**
@@ -488,22 +525,6 @@ PROMPT;
     private function maxEvidenceChars(int $contextWindow): int
     {
         return max(4000, (int)($contextWindow * 0.6 * 3.5));
-    }
-
-    private function condenseObservation(string $text, int $maxChars, string $model): string
-    {
-        if (mb_strlen($text) <= $maxChars) {
-            return $text;
-        }
-        $targetWords = (int)($maxChars / 5);
-        $prompt = <<<PROMPT
-Povzemi naslednje besedilo v največ {$targetWords} besedah. Ohrani vse konkretne navedbe dokumentov, členov, naslovov in postopkov. Izpusti ponavljajoče se vsebine.
-
-{$text}
-
-Povzetek:
-PROMPT;
-        return $this->ollama->generate($prompt, $model, false);
     }
 
     private function truncateObservation(string $text, int $maxChars): string

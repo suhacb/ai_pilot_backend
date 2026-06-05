@@ -9,6 +9,7 @@ use App\Services\Agent\AgentOrchestrator;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\Rule;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -25,7 +26,7 @@ class SessionController extends Controller
     public function index(): JsonResponse
     {
         $sessions = AgentSession::orderByDesc('created_at')
-            ->get(['id', 'model_generative', 'model_planning', 'model_locked', 'created_at']);
+            ->get(['id', 'model_generative', 'model_planning', 'model_locked', 'title', 'created_at']);
 
         return response()->json($sessions);
     }
@@ -73,6 +74,7 @@ class SessionController extends Controller
             'model'          => $session->model_generative,
             'model_planning' => $session->model_planning,
             'model_locked'   => $session->model_locked,
+            'title'          => $session->title,
         ]);
     }
 
@@ -95,17 +97,25 @@ class SessionController extends Controller
 
         $session = AgentSession::findOrFail($id);
 
+        $title = null;
+
         if (!$session->model_locked) {
+            $planningModel = $validated['model_planning'] ?? $session->model_planning ?? $validated['model'] ?? $session->model_generative;
+            $title = $this->orchestrator->generateTitle($validated['prompt'], $planningModel);
+
             $session->update([
                 'model_generative' => $validated['model']          ?? $session->model_generative,
                 'model_planning'   => $validated['model_planning'] ?? $session->model_planning,
                 'model_locked'     => true,
+                'title'            => $title,
             ]);
         }
 
         $generator = $this->orchestrator->run($validated['prompt'], $session);
 
-        return new StreamedResponse(function () use ($generator, $session) {
+        return new StreamedResponse(function () use ($generator, $session, $title) {
+            set_time_limit(0);
+
             $emit = function (array $event) {
                 echo 'data: ' . json_encode($event, JSON_UNESCAPED_UNICODE) . "\n\n";
                 if (ob_get_level() > 0) {
@@ -120,8 +130,21 @@ class SessionController extends Controller
                 'model_planning' => $session->model_planning,
             ]);
 
-            foreach ($generator as $event) {
-                $emit($event);
+            if ($title !== null) {
+                $emit(['type' => 'session_title', 'title' => $title]);
+            }
+
+            try {
+                foreach ($generator as $event) {
+                    $emit($event);
+                }
+            } catch (\Throwable $e) {
+                Log::error('[SSE] Exception escaped generator', [
+                    'session' => $session->id,
+                    'error'   => $e->getMessage(),
+                    'class'   => get_class($e),
+                ]);
+                $emit(['type' => 'error', 'message' => 'Prišlo je do nepričakovane napake.']);
             }
 
             echo "data: [DONE]\n\n";
