@@ -16,6 +16,8 @@ class SessionControllerTest extends TestCase
 
     public function test_it_creates_a_session_and_returns_session_id(): void
     {
+        $this->createOllamaModel('gemma4:26b', 'generative');
+
         $response = $this->postJson('/api/sessions', ['model' => 'gemma4:26b']);
 
         $response->assertStatus(201)
@@ -27,8 +29,10 @@ class SessionControllerTest extends TestCase
 
     public function test_it_stores_model_planning_when_provided(): void
     {
+        $this->createOllamaModel('qwen3:14b', 'generative');
+
         $this->postJson('/api/sessions', [
-            'model'          => 'qwen3:14b:32b',
+            'model'          => 'qwen3:14b',
             'model_planning' => 'qwen3:14b',
         ])->assertStatus(201);
 

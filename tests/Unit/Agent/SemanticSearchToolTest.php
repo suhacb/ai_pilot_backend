@@ -101,7 +101,7 @@ class SemanticSearchToolTest extends TestCase
 
         $result = $tool->execute(['query' => 'test']);
 
-        $this->assertStringContainsString('No results', $result);
+        $this->assertStringContainsString('Ni rezultatov', $result);
     }
 
     // -------------------------------------------------------------------------

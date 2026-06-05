@@ -51,8 +51,8 @@ class TextChunkerTest extends TestCase
 
         $this->assertGreaterThan(1, count($chunks));
         foreach ($chunks as $chunk) {
-            // 350 token ceiling (target ~300 + tolerance for overlap text)
-            $this->assertLessThanOrEqual(350, $chunk['token_count'], "Chunk exceeded token limit");
+            // 450 token ceiling: TARGET_CHARS=800 + OVERLAP_CHARS=80 + "\n\n"=4 → max 884 chars = 442 tokens
+            $this->assertLessThanOrEqual(450, $chunk['token_count'], "Chunk exceeded token limit");
         }
     }
 

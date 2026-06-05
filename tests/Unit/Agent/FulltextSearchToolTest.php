@@ -81,7 +81,7 @@ class FulltextSearchToolTest extends TestCase
 
         $result = $tool->execute(['query' => 'nothing']);
 
-        $this->assertStringContainsString('No results', $result);
+        $this->assertStringContainsString('Ni rezultatov', $result);
     }
 
     // -------------------------------------------------------------------------

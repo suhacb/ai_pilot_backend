@@ -5,9 +5,7 @@ namespace App\Services\Agent;
 use App\Exceptions\GenerationCancelledException;
 use App\Models\AgentSession;
 use App\Models\AgentStep;
-use App\Services\Agent\Tools\FulltextSearchTool;
 use App\Services\Agent\Tools\GetDocumentTool;
-use App\Services\Agent\Tools\SemanticSearchTool;
 use App\Services\Agent\Tools\WebSearchTool;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
@@ -16,8 +14,7 @@ class AgentOrchestrator
 {
     public function __construct(
         private readonly OllamaClient $ollama,
-        private readonly SemanticSearchTool $semanticSearch,
-        private readonly FulltextSearchTool $fulltextSearch,
+        private readonly RagRetriever $retriever,
         private readonly WebSearchTool $webSearch,
         private readonly GetDocumentTool $getDocument,
         private readonly int $maxIterations,
@@ -103,7 +100,7 @@ class AgentOrchestrator
 
             $tool        = $step['action'];
             $params      = $step['parameters'] ?? [];
-            $observation = $this->dispatchTool($tool, $params);
+            $observation = $this->dispatchTool($tool, $params, $planningModel);
 
             $obsHash = md5($observation);
             if (isset($seenHashes[$obsHash])) {
@@ -178,14 +175,14 @@ class AgentOrchestrator
         );
     }
 
-    private function dispatchTool(string $tool, array $params): string
+    private function dispatchTool(string $tool, array $params, string $planningModel): string
     {
         return match ($tool) {
-            'search_semantic'  => $this->semanticSearch->execute($params),
-            'search_fulltext'  => $this->fulltextSearch->execute($params),
-            'search_web'       => $this->webSearch->execute($params),
-            'get_document'     => $this->getDocument->execute($params),
-            default            => "Unknown tool: $tool",
+            'search_semantic' => $this->retriever->semanticSearch($params, $planningModel),
+            'search_fulltext' => $this->retriever->fulltextSearch($params, $planningModel),
+            'search_web'      => $this->webSearch->execute($params),
+            'get_document'    => $this->getDocument->execute($params),
+            default           => "Unknown tool: $tool",
         };
     }
 

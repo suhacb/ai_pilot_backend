@@ -40,7 +40,8 @@ class OllamaClientTest extends TestCase
         $body = json_decode((string) $request->getBody(), true);
         $this->assertSame(self::MODEL, $body['model']);
         $this->assertSame('My prompt', $body['prompt']);
-        $this->assertFalse($body['stream']);
+        $this->assertTrue($body['stream']);
+        $this->assertSame(8192, $body['options']['num_ctx']);
         $this->assertSame('json', $body['format']);
     }
 
@@ -208,10 +209,9 @@ class OllamaClientTest extends TestCase
         $stack = HandlerStack::create(new MockHandler($responses));
         $stack->push(Middleware::history($this->history));
 
-        return new OllamaClient(
-            new Client(['handler' => $stack]),
-            self::BASE_URL,
-        );
+        $client = new OllamaClient(new Client(['handler' => $stack]), self::BASE_URL);
+        $client->setContextWindow(self::MODEL, 8192);
+        return $client;
     }
 
     private function psResponse(?string $loadedModel = null): Response

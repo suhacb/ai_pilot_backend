@@ -25,6 +25,11 @@ class OllamaClient
         $this->cancelCheck = $fn;
     }
 
+    public function setContextWindow(string $model, int $window): void
+    {
+        $this->ctxCache[$model] = $window;
+    }
+
     /**
      * Look up the registered context window for a model.
      * Falls back to 8 192 if the model is not in the registry.

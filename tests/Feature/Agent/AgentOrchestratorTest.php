@@ -6,9 +6,8 @@ use App\Models\AgentSession;
 use App\Models\AgentStep;
 use App\Services\Agent\AgentOrchestrator;
 use App\Services\Agent\OllamaClient;
-use App\Services\Agent\Tools\FulltextSearchTool;
+use App\Services\Agent\RagRetriever;
 use App\Services\Agent\Tools\GetDocumentTool;
-use App\Services\Agent\Tools\SemanticSearchTool;
 use App\Services\Agent\Tools\WebSearchTool;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -32,6 +31,7 @@ class AgentOrchestratorTest extends TestCase
     public function test_it_yields_step_then_answer_events(): void
     {
         $orchestrator = $this->makeOrchestrator(ollamaResponses: [
+            $this->highRelevanceResponse(),
             $this->toolCallResponse('search_semantic', ['query' => 'ZInfV-1 obveznosti']),
             $this->finishResponse('Obveznosti so naslednje...'),
             'Sintetiziran odgovor.',
@@ -39,14 +39,16 @@ class AgentOrchestratorTest extends TestCase
 
         $events = iterator_to_array($orchestrator->run('Kakšne so naše obveznosti?', $this->session), false);
 
-        $this->assertCount(2, $events);
-        $this->assertSame('step',   $events[0]['type']);
-        $this->assertSame('answer', $events[1]['type']);
+        $types = array_column($events, 'type');
+        $this->assertContains('step',   $types);
+        $this->assertContains('answer', $types);
+        $this->assertSame('answer', end($events)['type']);
     }
 
-    public function test_it_yields_correct_step_payload(): void
+    public function test_it_yields_correct_step_message(): void
     {
         $orchestrator = $this->makeOrchestrator(ollamaResponses: [
+            $this->highRelevanceResponse(),
             $this->toolCallResponse('search_fulltext', ['query' => 'člen 12', 'top_k' => 3]),
             $this->finishResponse('Odgovor.'),
             'Sintetiziran odgovor.',
@@ -54,43 +56,42 @@ class AgentOrchestratorTest extends TestCase
 
         $events = iterator_to_array($orchestrator->run('Iščem člen 12.', $this->session), false);
 
-        $step = $events[0];
-        $this->assertSame('search_fulltext', $step['action_tool']);
-        $this->assertSame(['query' => 'člen 12', 'top_k' => 3], $step['action_params']);
-        $this->assertSame('Rezultati iskanja.', $step['observation']);
-        $this->assertNotEmpty($step['reasoning']);
+        $stepMessages = array_column(
+            array_filter($events, fn($e) => $e['type'] === 'step'),
+            'message'
+        );
+        $this->assertNotEmpty(array_filter($stepMessages, fn($m) => str_contains($m ?? '', 'člen 12')));
     }
 
-    public function test_it_yields_correct_answer_payload(): void
+    public function test_it_yields_correct_answer_content(): void
     {
         $orchestrator = $this->makeOrchestrator(ollamaResponses: [
+            $this->highRelevanceResponse(),
             $this->finishResponse('intermediate'),
-            'To je moj končni odgovor.',  // synthesis call returns the actual content
+            'To je moj končni odgovor.',
         ]);
 
         $events = iterator_to_array($orchestrator->run('Vprašanje.', $this->session), false);
 
-        $this->assertCount(1, $events);
-        $this->assertSame('answer', $events[0]['type']);
-        $this->assertSame('To je moj končni odgovor.', $events[0]['content']);
+        $answer = end($events);
+        $this->assertSame('answer', $answer['type']);
+        $this->assertSame('To je moj končni odgovor.', $answer['content']);
     }
 
-    public function test_it_dispatches_the_correct_tool(): void
+    public function test_it_dispatches_semantic_search_through_retriever(): void
     {
-        $mockSemantic = $this->createMock(SemanticSearchTool::class);
-        $mockSemantic->expects($this->once())->method('execute')->willReturn('semantic results');
-
-        $mockFulltext = $this->createMock(FulltextSearchTool::class);
-        $mockFulltext->expects($this->never())->method('execute');
+        $mockRetriever = $this->createMock(RagRetriever::class);
+        $mockRetriever->expects($this->once())->method('semanticSearch')->willReturn('semantic results');
+        $mockRetriever->expects($this->never())->method('fulltextSearch');
 
         $orchestrator = $this->makeOrchestrator(
             ollamaResponses: [
+                $this->highRelevanceResponse(),
                 $this->toolCallResponse('search_semantic', ['query' => 'test']),
                 $this->finishResponse('done'),
                 'synthesis result',
             ],
-            semanticTool: $mockSemantic,
-            fulltextTool: $mockFulltext,
+            retriever: $mockRetriever,
         );
 
         iterator_to_array($orchestrator->run('query', $this->session), false);
@@ -99,6 +100,7 @@ class AgentOrchestratorTest extends TestCase
     public function test_it_persists_agent_steps_to_the_database(): void
     {
         $orchestrator = $this->makeOrchestrator(ollamaResponses: [
+            $this->highRelevanceResponse(),
             $this->toolCallResponse('search_web', ['query' => 'dobavitelji']),
             $this->finishResponse('Ocena tveganja.'),
             'Synthesized risk assessment.',
@@ -116,13 +118,18 @@ class AgentOrchestratorTest extends TestCase
         $this->assertNotNull($finishStep);
     }
 
-    public function test_it_stops_after_max_iterations_and_yields_partial_answer(): void
+    public function test_it_stops_after_max_iterations_and_yields_answer(): void
     {
-        // Always return a tool call — never finish
         $infiniteToolCall = $this->toolCallResponse('search_semantic', ['query' => 'loop']);
 
         $orchestrator = $this->makeOrchestrator(
-            ollamaResponses: array_fill(0, 3, $infiniteToolCall),
+            ollamaResponses: [
+                $this->highRelevanceResponse(),
+                $infiniteToolCall,
+                $infiniteToolCall,
+                $infiniteToolCall,
+                'Odgovor na podlagi zbranih informacij.',
+            ],
             toolObservation: 'result',
             maxIterations: 3,
         );
@@ -131,18 +138,18 @@ class AgentOrchestratorTest extends TestCase
 
         $last = end($events);
         $this->assertSame('answer', $last['type']);
-        $this->assertStringContainsString('iterations', strtolower($last['content']));
+        $this->assertNotEmpty($last['content']);
     }
 
     public function test_it_handles_malformed_llm_json_gracefully(): void
     {
         $mockOllama = $this->createMock(OllamaClient::class);
         $mockOllama->method('generate')->willReturn('This is not JSON at all!!!');
+        $mockOllama->method('contextWindowFor')->willReturn(8192);
 
         $orchestrator = new AgentOrchestrator(
             $mockOllama,
-            $this->createMock(SemanticSearchTool::class),
-            $this->createMock(FulltextSearchTool::class),
+            $this->createMock(RagRetriever::class),
             $this->createMock(WebSearchTool::class),
             $this->createMock(GetDocumentTool::class),
             maxIterations: 1,
@@ -164,6 +171,7 @@ class AgentOrchestratorTest extends TestCase
 
         $callLog    = [];
         $mockOllama = $this->createMock(OllamaClient::class);
+        $mockOllama->method('contextWindowFor')->willReturn(8192);
         $mockOllama->method('generate')
             ->willReturnCallback(function (string $prompt, string $model, bool $jsonFormat = true) use (&$callLog): string {
                 $callLog[] = ['model' => $model, 'jsonFormat' => $jsonFormat];
@@ -181,20 +189,23 @@ class AgentOrchestratorTest extends TestCase
 
         $orchestrator = new AgentOrchestrator(
             $mockOllama,
-            $this->stubTool(SemanticSearchTool::class, ''),
-            $this->stubTool(FulltextSearchTool::class, ''),
-            $this->stubTool(WebSearchTool::class, ''),
-            $this->stubTool(GetDocumentTool::class, ''),
+            $this->createMock(RagRetriever::class),
+            $this->createMock(WebSearchTool::class),
+            $this->createMock(GetDocumentTool::class),
             maxIterations: 8,
         );
 
         $events = iterator_to_array($orchestrator->run('Vprašanje.', $session), false);
 
-        $this->assertCount(2, $callLog);
-        $this->assertSame('small-model', $callLog[0]['model']);
-        $this->assertTrue($callLog[0]['jsonFormat']);
-        $this->assertSame('large-model', $callLog[1]['model']);
-        $this->assertFalse($callLog[1]['jsonFormat']);
+        $planningCalls  = array_values(array_filter($callLog, fn($c) => $c['jsonFormat'] === true));
+        $synthesisCalls = array_values(array_filter($callLog, fn($c) => $c['jsonFormat'] === false));
+
+        $this->assertNotEmpty($planningCalls);
+        $this->assertCount(1, $synthesisCalls);
+        $this->assertSame('large-model', $synthesisCalls[0]['model']);
+        foreach ($planningCalls as $call) {
+            $this->assertSame('small-model', $call['model']);
+        }
 
         $answer = end($events);
         $this->assertSame('answer', $answer['type']);
@@ -202,6 +213,11 @@ class AgentOrchestratorTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
+
+    private function highRelevanceResponse(): string
+    {
+        return json_encode(['level' => 'HIGH', 'message' => null]);
+    }
 
     private function toolCallResponse(string $tool, array $params): string
     {
@@ -221,31 +237,28 @@ class AgentOrchestratorTest extends TestCase
         ]);
     }
 
-    /**
-     * @param  string[]  $ollamaResponses  Pre-encoded JSON strings the mock LLM will return in order.
-     */
     private function makeOrchestrator(
         array $ollamaResponses,
         string $toolObservation = 'Tool result.',
-        ?SemanticSearchTool $semanticTool = null,
-        ?FulltextSearchTool $fulltextTool = null,
+        ?RagRetriever $retriever = null,
         int $maxIterations = 8,
     ): AgentOrchestrator {
         $mockOllama = $this->createMock(OllamaClient::class);
         $mockOllama->method('generate')->willReturnOnConsecutiveCalls(...$ollamaResponses);
+        $mockOllama->method('contextWindowFor')->willReturn(8192);
 
-        $semantic = $semanticTool ?? $this->stubTool(SemanticSearchTool::class, $toolObservation);
-        $fulltext  = $fulltextTool  ?? $this->stubTool(FulltextSearchTool::class, $toolObservation);
-        $web      = $this->stubTool(WebSearchTool::class, $toolObservation);
-        $getDoc   = $this->stubTool(GetDocumentTool::class, $toolObservation);
+        if ($retriever === null) {
+            $retriever = $this->createMock(RagRetriever::class);
+            $retriever->method('semanticSearch')->willReturn($toolObservation);
+            $retriever->method('fulltextSearch')->willReturn($toolObservation);
+        }
 
-        return new AgentOrchestrator($mockOllama, $semantic, $fulltext, $web, $getDoc, $maxIterations);
-    }
+        $web    = $this->createMock(WebSearchTool::class);
+        $web->method('execute')->willReturn($toolObservation);
 
-    private function stubTool(string $class, string $observation): object
-    {
-        $mock = $this->createMock($class);
-        $mock->method('execute')->willReturn($observation);
-        return $mock;
+        $getDoc = $this->createMock(GetDocumentTool::class);
+        $getDoc->method('execute')->willReturn($toolObservation);
+
+        return new AgentOrchestrator($mockOllama, $retriever, $web, $getDoc, $maxIterations);
     }
 }

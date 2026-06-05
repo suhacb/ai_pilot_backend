@@ -4,6 +4,9 @@ namespace App\Providers;
 
 use App\Services\Agent\AgentOrchestrator;
 use App\Services\Agent\OllamaClient;
+use App\Services\Agent\QueryExpander;
+use App\Services\Agent\RagRetriever;
+use App\Services\Agent\ResultReranker;
 use App\Services\Agent\Tools\FulltextSearchTool;
 use App\Services\Agent\Tools\GetDocumentTool;
 use App\Services\Agent\Tools\SemanticSearchTool;
@@ -67,10 +70,24 @@ class AppServiceProvider extends ServiceProvider
             config('services.searxng.url'),
         ));
 
-        $this->app->singleton(AgentOrchestrator::class, fn($app) => new AgentOrchestrator(
+        $this->app->singleton(QueryExpander::class, fn($app) => new QueryExpander(
             $app->make(OllamaClient::class),
+        ));
+
+        $this->app->singleton(ResultReranker::class, fn($app) => new ResultReranker(
+            $app->make(OllamaClient::class),
+        ));
+
+        $this->app->singleton(RagRetriever::class, fn($app) => new RagRetriever(
             $app->make(SemanticSearchTool::class),
             $app->make(FulltextSearchTool::class),
+            $app->make(QueryExpander::class),
+            $app->make(ResultReranker::class),
+        ));
+
+        $this->app->singleton(AgentOrchestrator::class, fn($app) => new AgentOrchestrator(
+            $app->make(OllamaClient::class),
+            $app->make(RagRetriever::class),
             $app->make(WebSearchTool::class),
             $app->make(GetDocumentTool::class),
             config('agent.max_iterations'),
